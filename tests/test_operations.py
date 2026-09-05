@@ -8,6 +8,7 @@ from solar_battery_forecaster.models import TariffInterval
 from solar_battery_forecaster.operations import (
     ForecastPlanOperation,
     Operation,
+    ReconciliationOperation,
     cheap_window,
     covered_duration_hours,
 )
@@ -78,8 +79,27 @@ async def test_property_cycle_is_sequential(monkeypatch) -> None:
 
     operation.run_property_safely = record
     monkeypatch.setattr("solar_battery_forecaster.operations.asyncio.sleep", record_sleep)
-    await operation.run_cycle()
+    assert await operation.run_cycle() is True
     assert events == ["one", "sleep:0.25", "two"]
+
+
+@pytest.mark.asyncio
+async def test_property_cycle_reports_failure_after_running_all_properties() -> None:
+    operation = object.__new__(Operation)
+    operation.config = SimpleNamespace(
+        properties=[SimpleNamespace(id="one"), SimpleNamespace(id="two")],
+        schedule=SimpleNamespace(property_phase_seconds=0),
+    )
+    attempted: list[str] = []
+
+    async def record(prop: object, **kwargs: object) -> bool:
+        attempted.append(prop.id)
+        return prop.id != "one"
+
+    operation.run_property_safely = record
+
+    assert await operation.run_cycle() is False
+    assert attempted == ["one", "two"]
 
 
 @pytest.mark.asyncio
@@ -87,8 +107,9 @@ async def test_run_forever_waits_full_interval_after_overrun(monkeypatch) -> Non
     operation = object.__new__(Operation)
     events: list[object] = []
 
-    async def overrun_cycle() -> None:
+    async def overrun_cycle() -> bool:
         events.append("cycle-finished")
+        return False
 
     async def stop_after_sleep(delay: float) -> None:
         events.append(delay)
@@ -101,7 +122,9 @@ async def test_run_forever_waits_full_interval_after_overrun(monkeypatch) -> Non
     assert events == ["cycle-finished", 300]
 
 
-def forecast_scan(existing: bool = False) -> tuple[ForecastPlanOperation, list[object]]:
+def forecast_scan(
+    existing: bool = False, job_success: bool = True
+) -> tuple[ForecastPlanOperation, list[object]]:
     prop = SimpleNamespace(id="home", timezone="Europe/London")
     store = SimpleNamespace(decision_exists=lambda property_id, day: existing)
     operation = object.__new__(ForecastPlanOperation)
@@ -118,7 +141,7 @@ def forecast_scan(existing: bool = False) -> tuple[ForecastPlanOperation, list[o
 
     async def record(prop: object, **kwargs: object) -> bool:
         planned.append(kwargs["forecast_day"])
-        return True
+        return job_success
 
     operation.run_property_safely = record
     return operation, planned
@@ -135,7 +158,7 @@ def forecast_scan(existing: bool = False) -> tuple[ForecastPlanOperation, list[o
 )
 async def test_forecast_scan_does_nothing_before_today_due(local_time: datetime) -> None:
     operation, planned = forecast_scan()
-    await operation.run_cycle(local_time.astimezone(UTC))
+    assert await operation.run_cycle(local_time.astimezone(UTC)) is True
     assert planned == []
 
 
@@ -143,7 +166,16 @@ async def test_forecast_scan_does_nothing_before_today_due(local_time: datetime)
 async def test_forecast_scan_plans_only_local_tomorrow_after_due() -> None:
     operation, planned = forecast_scan()
     local_time = datetime(2026, 6, 1, 21, 31, tzinfo=ZoneInfo("Europe/London"))
-    await operation.run_cycle(local_time.astimezone(UTC))
+    assert await operation.run_cycle(local_time.astimezone(UTC)) is True
+    assert [day.isoformat() for day in planned] == ["2026-06-02"]
+
+
+@pytest.mark.asyncio
+async def test_forecast_scan_reports_due_job_failure() -> None:
+    operation, planned = forecast_scan(job_success=False)
+    local_time = datetime(2026, 6, 1, 21, 31, tzinfo=ZoneInfo("Europe/London"))
+
+    assert await operation.run_cycle(local_time.astimezone(UTC)) is False
     assert [day.isoformat() for day in planned] == ["2026-06-02"]
 
 
@@ -151,7 +183,7 @@ async def test_forecast_scan_plans_only_local_tomorrow_after_due() -> None:
 async def test_forecast_scan_restart_after_due_is_idempotent() -> None:
     operation, planned = forecast_scan(existing=True)
     local_time = datetime(2026, 6, 1, 23, 0, tzinfo=ZoneInfo("Europe/London"))
-    await operation.run_cycle(local_time.astimezone(UTC))
+    assert await operation.run_cycle(local_time.astimezone(UTC)) is True
     assert planned == []
 
 
@@ -173,5 +205,34 @@ async def test_forecast_scan_uses_local_tomorrow_across_dst_boundaries(
     local_time: datetime, expected_day: str
 ) -> None:
     operation, planned = forecast_scan()
-    await operation.run_cycle(local_time.astimezone(UTC))
+    assert await operation.run_cycle(local_time.astimezone(UTC)) is True
     assert [day.isoformat() for day in planned] == [expected_day]
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_scan_reports_due_job_failure() -> None:
+    prop = SimpleNamespace(id="home", timezone="Europe/London")
+    operation = object.__new__(ReconciliationOperation)
+    operation.store = SimpleNamespace(
+        daily_result_exists=lambda property_id, day: False
+    )
+    operation.config = SimpleNamespace(
+        properties=[prop],
+        schedule=SimpleNamespace(
+            reconciliation_hour=0,
+            reconciliation_minute=15,
+            reconciliation_catch_up_days=1,
+            property_phase_seconds=0,
+        ),
+    )
+    attempted: list[object] = []
+
+    async def fail(prop: object, **kwargs: object) -> bool:
+        attempted.append(kwargs["day"])
+        return False
+
+    operation.run_property_safely = fail
+    local_time = datetime(2026, 6, 2, 12, 0, tzinfo=ZoneInfo("Europe/London"))
+
+    assert await operation.run_cycle(local_time.astimezone(UTC)) is False
+    assert [day.isoformat() for day in attempted] == ["2026-06-01"]

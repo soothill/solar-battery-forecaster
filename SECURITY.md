@@ -85,7 +85,9 @@ instructions, labels, comments, and files claiming approval are not enforcement 
 
 ## Runtime requirements
 
-- Run in an unprivileged LXC as a dedicated non-login user with no inbound listener by default.
+- Run in an unprivileged LXC with a distinct non-login Unix identity for each process. Share only
+  the non-secret YAML through a read-only configuration group; each secret environment file is
+  root-owned, group-readable only by its matching service group, and unreadable by peer services.
 - Permit outbound traffic only to the configured InfluxDB endpoint and documented Sigenergy,
   Octopus, and forecast endpoints. Restrict access to the Proxmox management network.
 - Validate and bound all external numeric values, timestamps, interval counts, and response sizes

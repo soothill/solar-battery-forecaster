@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from solar_battery_forecaster.config import InfluxConfig, PropertyConfig
 
 PROPERTY_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
+PROVIDER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 @dataclass(frozen=True)
@@ -144,39 +145,55 @@ class InfluxDashboardRepository:
         self,
         field: str,
         property_id: str,
+        provider: str,
         start: datetime,
         stop: datetime,
     ) -> list[CurvePoint]:
         if not PROPERTY_ID_PATTERN.fullmatch(property_id):
             raise ValueError("invalid property ID")
+        if not PROVIDER_PATTERN.fullmatch(provider):
+            raise ValueError("invalid forecast provider")
         start_text = start.astimezone(UTC).isoformat()
         stop_text = stop.astimezone(UTC).isoformat()
+        field_filter = f'r._field == "{field}"'
+        kept_fields = f'"{field}"'
+        if field != "issued_at_epoch":
+            field_filter += ' or r._field == "issued_at_epoch"'
+            kept_fields += ', "issued_at_epoch"'
         query = f'''from(bucket: "{self.influx.planning_bucket}")
   |> range(start: time(v: "{start_text}"), stop: time(v: "{stop_text}"))
   |> filter(fn: (r) => r._measurement == "pv_forecast")
-  |> filter(fn: (r) => r.property == "{property_id}" and r.role == "overnight")
-  |> filter(fn: (r) => r._field == "{field}")
-  |> keep(columns: ["_time", "_value", "snapshot"])
+  |> filter(fn: (r) => r.property == "{property_id}" and r.provider == "{provider}")
+  |> filter(fn: (r) => r.role == "overnight")
+  |> filter(fn: (r) => {field_filter})
+  |> pivot(rowKey: ["_time", "snapshot"], columnKey: ["_field"], valueColumn: "_value")
+  |> keep(columns: ["_time", "snapshot", {kept_fields}])
   |> sort(columns: ["_time"])
 '''
         tables = self.client.query_api().query(query=query, org=self.influx.org)
         grouped: dict[str, list[CurvePoint]] = {}
+        issued_epochs: dict[str, set[float]] = {}
         for table in tables:
             for record in table.records:
                 snapshot = str(record.values.get("snapshot", ""))
+                value = record.values.get(field)
+                issued_at = record.values.get("issued_at_epoch")
+                if value is None or issued_at is None:
+                    continue
                 grouped.setdefault(snapshot, []).append(
-                    CurvePoint(record.get_time(), float(record.get_value()))
+                    CurvePoint(record.get_time(), float(value))
                 )
+                issued_epochs.setdefault(snapshot, set()).add(float(issued_at))
         expected_points = int((stop - start).total_seconds() / 3600)
         complete = {
-            snapshot: points
+            snapshot: (next(iter(issued_epochs[snapshot])), points)
             for snapshot, points in grouped.items()
-            if len(points) == expected_points
+            if len(points) == expected_points and len(issued_epochs[snapshot]) == 1
         }
         if not complete:
             return []
-        snapshot = min(complete)
-        return complete[snapshot]
+        _, points = max(complete.values(), key=lambda item: item[0])
+        return points
 
     def _tariff_windows(
         self, property_id: str, start: datetime, stop: datetime
@@ -207,10 +224,10 @@ class InfluxDashboardRepository:
     def curve(self, prop: PropertyConfig, day: date) -> dict[str, Any]:
         start, stop = local_day_bounds(day, prop.timezone)
         forecast_power = self._forecast_points(
-            "conservative_power_kw", prop.id, start, stop
+            "conservative_power_kw", prop.id, prop.forecast.adapter, start, stop
         )
         forecast_energy = self._forecast_points(
-            "conservative_energy_kwh", prop.id, start, stop
+            "conservative_energy_kwh", prop.id, prop.forecast.adapter, start, stop
         )
         actual_power = self._points("energy_telemetry", "pv_power_kw", prop.id, start, stop, "15m")
         actual_soc = self._points(
@@ -218,7 +235,7 @@ class InfluxDashboardRepository:
         )
         cheap_intervals = self._tariff_windows(prop.id, start, stop)
         issued_at = self._forecast_points(
-            "issued_at_epoch", prop.id, start, stop
+            "issued_at_epoch", prop.id, prop.forecast.adapter, start, stop
         )
         target_soc = self._latest_before("battery_decision", "target_soc_percent", prop.id, start)
         grid_charge = self._latest_before("battery_decision", "grid_charge_kwh", prop.id, start)

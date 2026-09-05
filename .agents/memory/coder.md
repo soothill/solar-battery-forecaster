@@ -18,3 +18,9 @@
 - 2026-09-05: Forecast planning becomes due only after today's local scheduled time and targets
   tomorrow; it never creates a late same-day plan. Command-scoped config strips unrelated provider
   secrets before expansion and selects a process-specific token for bucket-level least privilege.
+- 2026-09-05: One-shot worker runs aggregate isolated property/due-job failures into a nonzero exit,
+  while long-lived workers continue subsequent cycles. Dashboard forecast reads use the same newest
+  complete issued snapshot as planning and reconciliation.
+- 2026-09-05: Runtime least privilege requires three explicit Influx buckets, distinct Unix
+  user/private-group identities and secret files per process, and an exactly pinned build backend
+  installed from the frozen development lock before no-isolation builds.

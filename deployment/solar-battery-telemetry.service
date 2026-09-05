@@ -5,8 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=solarplanner
-Group=solarplanner
+User=solar-telemetry
+Group=solar-telemetry
+SupplementaryGroups=solar-config
 WorkingDirectory=/opt/solar-battery-forecaster
 EnvironmentFile=/etc/solar-battery-forecaster/telemetry.env
 ExecStart=/opt/solar-battery-forecaster/.venv/bin/solar-battery-forecaster telemetry --config /etc/solar-battery-forecaster/config.yaml

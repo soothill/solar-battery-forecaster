@@ -5,8 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=solarplanner
-Group=solarplanner
+User=solar-dashboard
+Group=solar-dashboard
+SupplementaryGroups=solar-config
 WorkingDirectory=/opt/solar-battery-forecaster
 EnvironmentFile=/etc/solar-battery-forecaster/dashboard.env
 ExecStart=/opt/solar-battery-forecaster/.venv/bin/solar-battery-dashboard --config /etc/solar-battery-forecaster/config.yaml --host 127.0.0.1 --port 8088

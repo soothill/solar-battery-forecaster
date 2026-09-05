@@ -24,7 +24,7 @@ jobs:
       - run: uv sync --frozen --all-extras
       - run: uv run ruff check .
       - run: uv run pytest
-      - run: uv run python -m build
+      - run: uv run --frozen python -m build --no-isolation
 
   security:
     runs-on: ubuntu-latest

@@ -99,11 +99,14 @@ class Operation:
     async def run_property(self, prop: PropertyConfig, **kwargs: object) -> None:
         raise NotImplementedError
 
-    async def run_cycle(self) -> None:
+    async def run_cycle(self) -> bool:
+        success = True
         for index, prop in enumerate(self.config.properties):
-            await self.run_property_safely(prop)
+            property_success = await self.run_property_safely(prop)
+            success = property_success and success
             if index + 1 < len(self.config.properties):
                 await asyncio.sleep(self.config.schedule.property_phase_seconds)
+        return success
 
     async def run_forever(self, interval_seconds: float) -> None:
         while True:
@@ -167,8 +170,9 @@ class ForecastPlanOperation(Operation):
         await asyncio.gather(*(adapter.close() for adapter in self.adapters.values()))
         await super().close()
 
-    async def run_cycle(self, now: datetime | None = None) -> None:
+    async def run_cycle(self, now: datetime | None = None) -> bool:
         instant = (now or datetime.now(UTC)).astimezone(UTC)
+        success = True
         for index, prop in enumerate(self.config.properties):
             local_now = instant.astimezone(ZoneInfo(prop.timezone))
             due_at = datetime.combine(
@@ -181,15 +185,27 @@ class ForecastPlanOperation(Operation):
             )
             if local_now >= due_at:
                 forecast_day = local_now.date() + timedelta(days=1)
-                exists = await asyncio.to_thread(
-                    self.store.decision_exists, prop.id, forecast_day
-                )
-                if not exists:
-                    await self.run_property_safely(
-                        prop, forecast_day=forecast_day, now=instant
+                try:
+                    exists = await asyncio.to_thread(
+                        self.store.decision_exists, prop.id, forecast_day
                     )
+                except Exception as exc:
+                    LOGGER.error(
+                        "%s due scan failed for property %s (%s)",
+                        self.name,
+                        prop.id,
+                        type(exc).__name__,
+                    )
+                    success = False
+                else:
+                    if not exists:
+                        property_success = await self.run_property_safely(
+                            prop, forecast_day=forecast_day, now=instant
+                        )
+                        success = property_success and success
             if index + 1 < len(self.config.properties):
                 await asyncio.sleep(self.config.schedule.property_phase_seconds)
+        return success
 
     async def run_property(self, prop: PropertyConfig, **kwargs: object) -> None:
         forecast_day = kwargs["forecast_day"]
@@ -334,8 +350,9 @@ class ForecastPlanOperation(Operation):
 class ReconciliationOperation(Operation):
     name = "reconciliation"
 
-    async def run_cycle(self, now: datetime | None = None) -> None:
+    async def run_cycle(self, now: datetime | None = None) -> bool:
         instant = (now or datetime.now(UTC)).astimezone(UTC)
+        success = True
         for index, prop in enumerate(self.config.properties):
             local_now = instant.astimezone(ZoneInfo(prop.timezone))
             today_due = local_now.replace(
@@ -348,13 +365,25 @@ class ReconciliationOperation(Operation):
                 day = local_now.date() - timedelta(days=age)
                 if age == 1 and local_now < today_due:
                     continue
-                exists = await asyncio.to_thread(
-                    self.store.daily_result_exists, prop.id, day
-                )
-                if not exists:
-                    await self.run_property_safely(prop, day=day)
+                try:
+                    exists = await asyncio.to_thread(
+                        self.store.daily_result_exists, prop.id, day
+                    )
+                except Exception as exc:
+                    LOGGER.error(
+                        "%s due scan failed for property %s (%s)",
+                        self.name,
+                        prop.id,
+                        type(exc).__name__,
+                    )
+                    success = False
+                else:
+                    if not exists:
+                        property_success = await self.run_property_safely(prop, day=day)
+                        success = property_success and success
             if index + 1 < len(self.config.properties):
                 await asyncio.sleep(self.config.schedule.property_phase_seconds)
+        return success
 
     async def run_property(self, prop: PropertyConfig, **kwargs: object) -> None:
         day = kwargs["day"]

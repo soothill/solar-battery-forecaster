@@ -25,6 +25,9 @@ SCOPED_CONFIG = """
 influxdb:
   url: https://influx.invalid
   org: test
+  telemetry_bucket: solar_telemetry
+  tariff_bucket: solar_tariff
+  planning_bucket: solar_planning
   tokens:
     telemetry: ${INFLUX_TELEMETRY_TOKEN}
     tariff: ${INFLUX_TARIFF_TOKEN}
@@ -97,3 +100,22 @@ def test_telemetry_scope_resolves_only_telemetry_and_inverter_secrets(
     assert config.influxdb.token == "telemetry-token"
     assert config.properties[0].inverter.app_key == "key"
     assert config.properties[0].inverter.system_id == "system"
+
+
+def test_scoped_config_rejects_legacy_single_bucket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        SCOPED_CONFIG.replace(
+            "  telemetry_bucket: solar_telemetry\n"
+            "  tariff_bucket: solar_tariff\n"
+            "  planning_bucket: solar_planning\n",
+            "  bucket: legacy_combined\n",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INFLUX_DASHBOARD_TOKEN", "dashboard-token")
+
+    with pytest.raises(ValueError, match="telemetry_bucket"):
+        load_config(path, scope="dashboard")

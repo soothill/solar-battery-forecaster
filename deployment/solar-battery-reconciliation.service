@@ -5,8 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=solarplanner
-Group=solarplanner
+User=solar-reconciliation
+Group=solar-reconciliation
+SupplementaryGroups=solar-config
 WorkingDirectory=/opt/solar-battery-forecaster
 EnvironmentFile=/etc/solar-battery-forecaster/reconciliation.env
 ExecStart=/opt/solar-battery-forecaster/.venv/bin/solar-battery-forecaster reconciliation --config /etc/solar-battery-forecaster/config.yaml

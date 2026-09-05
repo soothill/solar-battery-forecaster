@@ -1,4 +1,5 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,7 +38,14 @@ def test_projection_is_empty_without_a_forecast() -> None:
 
 def test_repository_rejects_property_id_before_building_query() -> None:
     repository = InfluxDashboardRepository(
-        InfluxConfig(url="http://influx.invalid", org="test", bucket="test", token="secret"),
+        InfluxConfig(
+            url="http://influx.invalid",
+            org="test",
+            telemetry_bucket="telemetry",
+            tariff_bucket="tariff",
+            planning_bucket="planning",
+            token="secret",
+        ),
         client=object(),
     )
     with pytest.raises(ValueError, match="invalid property ID"):
@@ -48,3 +56,51 @@ def test_repository_rejects_property_id_before_building_query() -> None:
             datetime(2026, 1, 1, tzinfo=UTC),
             datetime(2026, 1, 2, tzinfo=UTC),
         )
+
+
+def test_dashboard_selects_newest_complete_forecast_snapshot() -> None:
+    start = datetime(2026, 9, 6, tzinfo=UTC)
+    old_issued = start - timedelta(hours=2)
+    new_issued = start - timedelta(hours=1)
+
+    class Record:
+        def __init__(self, at: datetime, snapshot: str, issued: datetime, value: float) -> None:
+            self.values = {
+                "snapshot": snapshot,
+                "issued_at_epoch": issued.timestamp(),
+                "conservative_energy_kwh": value,
+            }
+            self.at = at
+
+        def get_time(self) -> datetime:
+            return self.at
+
+    records = [
+        Record(start, "z-old", old_issued, 1),
+        Record(start + timedelta(hours=1), "z-old", old_issued, 2),
+        Record(start, "a-new", new_issued, 3),
+        Record(start + timedelta(hours=1), "a-new", new_issued, 4),
+    ]
+    query_api = SimpleNamespace(query=lambda **kwargs: [SimpleNamespace(records=records)])
+    client = SimpleNamespace(query_api=lambda: query_api, close=lambda: None)
+    repository = InfluxDashboardRepository(
+        InfluxConfig(
+            url="http://influx.invalid",
+            org="test",
+            telemetry_bucket="telemetry",
+            tariff_bucket="tariff",
+            planning_bucket="planning",
+            token="secret",
+        ),
+        client=client,
+    )
+
+    points = repository._forecast_points(  # noqa: SLF001 - verifies snapshot selection
+        "conservative_energy_kwh",
+        "home",
+        "open_meteo",
+        start,
+        start + timedelta(hours=2),
+    )
+
+    assert [point.value for point in points] == [3, 4]

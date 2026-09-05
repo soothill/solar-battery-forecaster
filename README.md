@@ -107,7 +107,9 @@ array layout and location before using its results.
 ## InfluxDB permissions
 
 Use separate telemetry, tariff, and planning buckets because InfluxDB OSS permissions are
-bucket-level. Give each worker its own token with only the bucket reads/writes listed in
+bucket-level. All three bucket names are required; the pre-release configuration deliberately
+rejects the legacy single `bucket` setting because it defeats process isolation. Give each worker
+its own token with only the bucket reads/writes listed in
 [`deployment/LXC.md`](deployment/LXC.md); never use an all-access operator token. Command-scoped
 configuration prevents a worker from resolving unrelated provider credentials or tokens.
 

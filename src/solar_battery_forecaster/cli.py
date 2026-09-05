@@ -66,7 +66,7 @@ async def _run(args: argparse.Namespace) -> int:
     operation = WORKERS[args.command](config)
     try:
         if args.once:
-            await operation.run_cycle()
+            return 0 if await operation.run_cycle() else 1
         else:
             await operation.run_forever(worker_interval(config, args.command))
         return 0

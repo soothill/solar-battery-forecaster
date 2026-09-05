@@ -31,8 +31,9 @@ coordinates, system IDs, and response bodies are excluded.
 
 - A failed worker does not restart or stop another worker.
 - Each command needs a separate service unit and database connection.
-- Each command has a distinct environment file. Configuration loading selects its token first and
-  strips unrelated provider credential fields before environment expansion.
+- Each command has a distinct Unix user, private group, and root-owned environment file. A shared
+  read-only group exposes only the non-secret YAML. Configuration loading selects its token first
+  and strips unrelated provider credential fields before environment expansion.
 - Telemetry, tariff, and planning data use separate buckets because InfluxDB authorization is
   bucket-scoped. Worker tokens receive only their required bucket operations.
 - Tariff collection must run often enough to satisfy the configured freshness bound.

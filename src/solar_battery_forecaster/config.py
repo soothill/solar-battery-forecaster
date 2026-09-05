@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal, TypeAlias
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ENV_PATTERN = re.compile(r"^\$\{([A-Z][A-Z0-9_]*)\}$")
 ConfigScope: TypeAlias = Literal[
@@ -25,21 +25,14 @@ SENSITIVE_PROVIDER_KEYS = {
 
 
 class InfluxConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     url: str
     org: str
-    bucket: str | None = None
-    telemetry_bucket: str = "solar_telemetry"
-    tariff_bucket: str = "solar_tariff"
-    planning_bucket: str = "solar_planning"
+    telemetry_bucket: str = Field(min_length=1)
+    tariff_bucket: str = Field(min_length=1)
+    planning_bucket: str = Field(min_length=1)
     token: str
-
-    @model_validator(mode="after")
-    def support_legacy_single_bucket(self) -> InfluxConfig:
-        if self.bucket:
-            self.telemetry_bucket = self.bucket
-            self.tariff_bucket = self.bucket
-            self.planning_bucket = self.bucket
-        return self
 
 
 class ScheduleConfig(BaseModel):
