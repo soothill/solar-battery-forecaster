@@ -18,9 +18,10 @@ def test_build_backend_is_exactly_pinned_in_frozen_dev_environment() -> None:
 
 
 def test_ci_build_disables_dependency_resolution_isolation() -> None:
-    workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "trusted-ci.yml"
+    ).read_text(encoding="utf-8")
 
-    assert "uv sync --frozen --all-extras" in workflow
+    assert "uv sync --python 3.11 --frozen --all-extras" in workflow
+    assert "uv sync --python 3.12 --frozen --all-extras" in workflow
     assert "uv run --frozen python -m build --no-isolation" in workflow

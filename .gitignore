@@ -11,4 +11,5 @@ build/
 *.egg-info/
 config.yaml
 state/
-
+/artifacts/
+/deployment/ci-runner/images.env.candidate

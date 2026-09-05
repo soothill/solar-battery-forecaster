@@ -68,3 +68,30 @@ async def test_fetch_rejects_non_finite_price() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ValueError, match="invalid price"):
             await OctopusTariff(config, client).fetch(datetime(2026, 9, 5, tzinfo=UTC))
+
+
+@pytest.mark.asyncio
+async def test_fetch_rejects_overlapping_intervals() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "valid_from": "2026-09-06T00:00:00Z",
+                        "valid_to": "2026-09-06T01:00:00Z",
+                        "value_inc_vat": 10,
+                    },
+                    {
+                        "valid_from": "2026-09-06T00:30:00Z",
+                        "valid_to": "2026-09-06T01:30:00Z",
+                        "value_inc_vat": 5,
+                    },
+                ]
+            },
+        )
+
+    config = TariffConfig(product_code="AGILE-TEST", tariff_code="E-1R-TEST-A")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ValueError, match="overlap"):
+            await OctopusTariff(config, client).fetch(datetime(2026, 9, 5, tzinfo=UTC))

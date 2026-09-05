@@ -14,6 +14,8 @@ influxdb:
 
 http:
   minimum_spacing_seconds: 0.5
+  # Decompressed provider JSON is rejected above this size (16 KiB-8 MiB).
+  max_response_bytes: 1048576
   max_attempts: 3
   retry_base_seconds: 1
   retry_max_seconds: 30

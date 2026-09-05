@@ -28,3 +28,21 @@
   exact version tags whose verified commit is reachable from protected main; frozen artifacts and
   their checksum file receive GitHub/Sigstore provenance attestations, which deployment verifies
   against the exact workflow, tag, and reviewed source digest before treating checksums as useful.
+- 2026-09-05: Provider JSON is consumed as a bounded decompressed stream and validated for
+  structural complexity before adapter parsing. Octopus intervals form one validated,
+  non-overlapping timeline for coverage, duration, and weighted-price calculations; Sigenergy's
+  nested data encoding has additional string, wrapper, shape, node, and depth limits.
+- 2026-09-05: In a 512 MB LXC, the four workers use 80 MB `MemoryMax` limits and the dashboard uses
+  96 MB, leaving 96 MB outside service ceilings for the base system.
+- 2026-09-05: The `ic-dev` runner deployment uses a root-owned systemd timer, encrypted GitHub App
+  credential, short-lived installation token, one-use JIT configuration, serialized one-job
+  container, disposable work volume, digest-addressed images, and validated proxy/firewall
+  lifecycle. Installation remains inactive until live isolation and egress acceptance pass.
+- 2026-09-05: Normal CI is anchored in the protected base workflow. An immutable origin condition
+  admits only same-repository heads to the read-only self-hosted quality job, and a separate hosted
+  no-checkout publisher uses a distinct protected-environment, status-only App to write final
+  App-bound required statuses to the exact head. All external fork workflows require approval and
+  must never be approved. Runner activation also
+  requires a fingerprint-bound executable host/egress/cleanup acceptance marker; failed JIT starts
+  are paced and use a fresh installation token for best-effort stale-registration cleanup. Trusted
+  tag release provenance remains GitHub-hosted.

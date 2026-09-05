@@ -1,0 +1,23 @@
+#include <tunables/global>
+
+profile solar-ci-runner flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  network inet stream,
+  network inet6 stream,
+  # Dynamic runtimes and native wheels require executable mappings (m).
+  /opt/actions-runner/** mrix,
+  /opt/python/** mrix,
+  /opt/uv-cache-seed/** r,
+  /opt/uv-cache/** mrwk,
+  /usr/** mrix,
+  /lib/** mr,
+  /lib64/** mr,
+  /opt/actions-runner/_work/** mrwkix,
+  /tmp/** mrwk,
+  /home/runner/** rwk,
+  deny /run/docker.sock rw,
+  deny /var/run/docker.sock rw,
+  deny /proc/sys/** w,
+  deny /sys/** w,
+}

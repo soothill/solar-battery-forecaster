@@ -22,6 +22,7 @@ from solar_battery_forecaster.models import (
 from solar_battery_forecaster.outbound import RequestPacer
 from solar_battery_forecaster.planner import correction_factor, make_decision
 from solar_battery_forecaster.storage import InfluxStore
+from solar_battery_forecaster.tariffs import validated_tariff_timeline
 
 LOGGER = logging.getLogger(__name__)
 
@@ -77,6 +78,7 @@ class Operation:
             retry_max_seconds=http.retry_max_seconds,
             retry_after_max_seconds=http.retry_after_max_seconds,
             jitter_seconds=http.jitter_seconds,
+            max_response_bytes=http.max_response_bytes,
         )
 
     async def close(self) -> None:
@@ -292,6 +294,7 @@ class ForecastPlanOperation(Operation):
         )
         if tariff_batch is None:
             raise RuntimeError("stored tariff is unavailable")
+        tariff_timeline = validated_tariff_timeline(tariff_batch.intervals)
         tariff_age = now.astimezone(UTC) - tariff_batch.retrieved_at.astimezone(UTC)
         if tariff_age < -timedelta(minutes=5) or tariff_age > timedelta(
             minutes=prop.tariff.stale_after_minutes
@@ -299,12 +302,12 @@ class ForecastPlanOperation(Operation):
             raise RuntimeError("stored tariff is stale")
         required_coverage = (charge_window_stop - local_now).total_seconds() / 3600
         coverage = covered_duration_hours(
-            tariff_batch.intervals, local_now, charge_window_stop
+            tariff_timeline, local_now, charge_window_stop
         )
         if coverage + 1e-6 < required_coverage:
             raise RuntimeError("stored tariff coverage is incomplete")
         cheap_hours, cheap_average = cheap_window(
-            tariff_batch.intervals, local_now, charge_window_stop
+            tariff_timeline, local_now, charge_window_stop
         )
         decision = make_decision(
             battery=prop.battery,

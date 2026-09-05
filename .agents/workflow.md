@@ -42,8 +42,22 @@ Run fast local checks before handoff. Batch related findings into one Coder corr
 Do not repeat a full gate when only non-executable documentation changes and the relevant owner
 confirms the candidate behavior is byte-identical.
 
+Use concise, evidence-based role handoffs and report conclusions, commands, outcomes, and blockers;
+do not store or request private chain-of-thought. Minimize agent turns by batching findings and
+using local preflight before asking another role to evaluate an exact candidate. Do not rerun an
+unchanged role gate or unchanged CI job merely to produce duplicate evidence.
+
+Minimize GitHub Actions jobs and triggers while retaining required independent evidence. Normal CI
+uses a protected-base `pull_request_target` definition: one sequential same-repository-only quality
+job on the ephemeral isolated `ic-dev` runner and one hosted no-checkout publisher for exact-head
+`intake` and `quality` statuses. Its workflow token has no permissions; a distinct status-only App
+credential is restricted to its protected environment. Untrusted quality code has only
+`contents: read`. All external fork workflows require approval and must never be approved, so fork
+heads have absent required statuses and cannot reach
+the runner; reviewed changes are imported into the base repository and submitted in a replacement
+PR. Release provenance continues to use GitHub-hosted runners.
+
 ## Memory
 
 Load the active role memory before work. Update it at durable decisions, material review findings,
 and handoff outcomes. Archive superseded chronology according to `.agents/memory/README.md`.
-

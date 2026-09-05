@@ -28,6 +28,7 @@ RestrictSUIDSGID=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
 MemoryDenyWriteExecute=true
+MemoryMax=96M
 
 [Install]
 WantedBy=multi-user.target

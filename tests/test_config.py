@@ -1,8 +1,9 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from solar_battery_forecaster.config import load_config
+from solar_battery_forecaster.config import HttpConfig, load_config
 
 
 def test_missing_environment_variable_fails(tmp_path: Path) -> None:
@@ -148,3 +149,9 @@ def test_scoped_config_rejects_every_duplicate_bucket_pair(
 
     with pytest.raises(ValueError, match="pairwise distinct"):
         load_config(path, scope="dashboard")
+
+
+@pytest.mark.parametrize("size", [16_383, 8_388_609])
+def test_http_response_limit_rejects_unsafe_bounds(size: int) -> None:
+    with pytest.raises(ValidationError, match="max_response_bytes"):
+        HttpConfig(max_response_bytes=size)

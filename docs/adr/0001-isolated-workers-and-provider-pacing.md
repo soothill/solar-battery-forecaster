@@ -20,6 +20,11 @@ a configurable minimum interval, and retried only for transport errors, HTTP 429
 Provider `Retry-After` values have their own configurable inline-wait maximum. A longer value is
 never shortened: the current cycle aborts and the pacer rejects later cycles without making an
 outbound request until the provider's full delay has elapsed.
+Responses are consumed as streams and rejected when their decompressed JSON exceeds the
+configurable byte ceiling or fixed structural limits. Octopus intervals must form one half-open,
+non-overlapping timeline: exact boundaries are accepted, while overlaps fail closed at collection
+and again before planning stored data. Sigenergy's nested `data` encoding has tighter wrapper,
+byte, object-shape, node, and depth bounds before telemetry normalization.
 
 Properties run sequentially with configurable phase spacing. Forecast-plan and reconciliation
 scan for due work, catch up missed runs, and check durable InfluxDB markers before writing.

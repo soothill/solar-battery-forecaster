@@ -19,6 +19,7 @@ def test_five_workers_have_independent_restart_contracts() -> None:
     commands: set[tuple[str, str]] = set()
     environment_files: set[str] = set()
     identities: set[tuple[str, str]] = set()
+    memory_limits: dict[str, str] = {}
     for path in unit_paths:
         unit = configparser.ConfigParser(interpolation=None)
         unit.optionxform = str
@@ -34,6 +35,7 @@ def test_five_workers_have_independent_restart_contracts() -> None:
         assert user == identity_by_environment[Path(environment_file).name]
         assert unit["Service"]["SupplementaryGroups"] == "solar-config"
         identities.add((user, group))
+        memory_limits[user] = unit["Service"]["MemoryMax"]
 
         argv = shlex.split(unit["Service"]["ExecStart"])
         program = Path(argv[0]).name
@@ -60,6 +62,13 @@ def test_five_workers_have_independent_restart_contracts() -> None:
         ("solar-forecast-plan", "solar-forecast-plan"),
         ("solar-reconciliation", "solar-reconciliation"),
         ("solar-dashboard", "solar-dashboard"),
+    }
+    assert memory_limits == {
+        "solar-telemetry": "80M",
+        "solar-tariff": "80M",
+        "solar-forecast-plan": "80M",
+        "solar-reconciliation": "80M",
+        "solar-dashboard": "96M",
     }
 
 

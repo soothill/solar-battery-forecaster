@@ -42,7 +42,7 @@ class OpenMeteoForecast:
         energy_by_end: dict[datetime, float] = defaultdict(float)
 
         for array in prop.arrays:
-            response = await self._pacer.request(
+            payload = await self._pacer.request_json(
                 self._client,
                 "GET",
                 API_URL,
@@ -57,7 +57,8 @@ class OpenMeteoForecast:
                     "forecast_days": 3,
                 },
             )
-            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("forecast provider returned an invalid response")
             hourly = payload.get("hourly", {})
             times = hourly.get("time", [])
             irradiances = hourly.get("global_tilted_irradiance", [])

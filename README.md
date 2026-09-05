@@ -39,7 +39,9 @@ target recommendation. At the end of a day it records actual versus forecast gen
 Telemetry, tariff, forecast planning, reconciliation, and the dashboard run as independent
 processes. A failure in one does not restart the others. Provider sessions are reused and all
 outbound requests are serialized, paced, and retried within configured bounds. Forecast planning
-uses only fresh Octopus intervals already stored by the tariff worker.
+uses only fresh Octopus intervals already stored by the tariff worker. Provider JSON is streamed
+through a decompressed-byte and structural-complexity limit; ambiguous overlapping tariff
+intervals are rejected before they can affect charge duration or price calculations.
 
 All timestamps are written in UTC. Property time zones are used only to define local days
 and schedules, which keeps half-hourly data correct over daylight-saving changes.

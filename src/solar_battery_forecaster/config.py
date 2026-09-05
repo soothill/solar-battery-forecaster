@@ -66,6 +66,7 @@ class HttpConfig(BaseModel):
     retry_max_seconds: float = Field(default=30, ge=1, le=300)
     retry_after_max_seconds: float = Field(default=300, ge=1, le=3600)
     jitter_seconds: float = Field(default=0.5, ge=0, le=10)
+    max_response_bytes: int = Field(default=1_048_576, ge=16_384, le=8_388_608)
 
 
 class ArrayConfig(BaseModel):

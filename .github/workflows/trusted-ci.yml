@@ -1,0 +1,117 @@
+name: Trusted CI
+
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  quality-run:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+    runs-on: [self-hosted, linux, x64, ic-dev, solar-public-ci, isolated, ephemeral, no-private-net]
+    env:
+      UV_CACHE_DIR: /opt/uv-cache
+      UV_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Assert exact pull-request head
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - name: Python 3.11 quality
+        run: |
+          uv sync --python 3.11 --frozen --all-extras
+          uv run --frozen --python 3.11 ruff check .
+          uv run --frozen --python 3.11 pytest
+      - name: Python 3.12 quality, security, and build
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -o pipefail
+          uv sync --python 3.12 --frozen --all-extras
+          uv run --frozen ruff check .
+          uv run --frozen pytest
+          uv run --frozen bandit -q -r src
+          uv run --frozen pip-audit --local --progress-spinner off \
+            --vulnerability-service osv
+          uv lock --check
+          gh api --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/dependency-graph/compare/$BASE_SHA...$HEAD_SHA" \
+            | uv run --frozen python -m solar_battery_forecaster.dependency_review
+          gitleaks detect --source . --no-banner --redact
+          uv run --frozen python -m build --no-isolation
+
+  publish-gates:
+    needs: quality-run
+    if: always()
+    runs-on: ubuntu-latest
+    environment: trusted-status-publisher
+    permissions: {}
+    steps:
+      - name: Publish exact-head required statuses without checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          QUALITY_RESULT: ${{ needs.quality-run.result }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          STATUS_APP_ID: ${{ secrets.STATUS_APP_ID }}
+          STATUS_APP_INSTALLATION_ID: ${{ secrets.STATUS_APP_INSTALLATION_ID }}
+          STATUS_APP_PRIVATE_KEY: ${{ secrets.STATUS_APP_PRIVATE_KEY }}
+        run: |
+          set -eu
+          if ! printf '%s' "$HEAD_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Invalid pull-request head SHA." >&2
+            exit 1
+          fi
+          printf '%s' "$STATUS_APP_ID" | grep -Eq '^[0-9]+$'
+          printf '%s' "$STATUS_APP_INSTALLATION_ID" | grep -Eq '^[0-9]+$'
+          key_file="$(mktemp "$RUNNER_TEMP/status-app-key.XXXXXX")"
+          trap 'rm -f "$key_file"' EXIT
+          chmod 0600 "$key_file"
+          printf '%s' "$STATUS_APP_PRIVATE_KEY" > "$key_file"
+          base64url() {
+            openssl base64 -A | tr '+/' '-_' | tr -d '='
+          }
+          issued_at="$(($(date +%s) - 60))"
+          expires_at="$((issued_at + 540))"
+          header="$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url)"
+          payload="$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' \
+            "$issued_at" "$expires_at" "$STATUS_APP_ID" | base64url)"
+          unsigned="$header.$payload"
+          signature="$(printf '%s' "$unsigned" | openssl dgst -sha256 -sign "$key_file" | base64url)"
+          app_jwt="$unsigned.$signature"
+          installation_token="$(
+            GH_TOKEN="$app_jwt" gh api --method POST \
+              "app/installations/$STATUS_APP_INSTALLATION_ID/access_tokens" --jq '.token'
+          )"
+          unset STATUS_APP_PRIVATE_KEY app_jwt unsigned signature payload header
+          intake_state=failure
+          quality_state=failure
+          if [ "$HEAD_REPOSITORY" = "$BASE_REPOSITORY" ]; then
+            intake_state=success
+          fi
+          if [ "$HEAD_REPOSITORY" = "$BASE_REPOSITORY" ] && [ "$QUALITY_RESULT" = success ]; then
+            quality_state=success
+          fi
+          GH_TOKEN="$installation_token" gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            --raw-field state="$intake_state" --raw-field context=intake \
+            --raw-field description="Trusted base-workflow origin gate"
+          GH_TOKEN="$installation_token" gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            --raw-field state="$quality_state" --raw-field context=quality \
+            --raw-field description="Isolated exact-head quality gate"
+          unset installation_token

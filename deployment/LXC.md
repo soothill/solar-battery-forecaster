@@ -177,6 +177,16 @@ The units do not require or restart one another. The dashboard listens on `127.0
 authenticated HTTPS reverse proxy for phone access. Direct `0.0.0.0` binding is suitable only on a
 trusted private LAN with firewall restrictions because version 0.1 has no authentication.
 
+Each provider/worker unit has `MemoryMax=80M` and the dashboard has `MemoryMax=96M`. Their 416 MB
+aggregate ceiling leaves 96 MB of a 512 MB LXC for the OS and service manager while bounding a
+single malformed response or process fault. InfluxDB is assumed to run outside this LXC. A process
+that reaches its cgroup ceiling is killed and then restarted by its own `Restart=on-failure` policy,
+without coupling peer services. Verify these limits with `systemctl show -p MemoryMax
+solar-battery-telemetry solar-battery-tariff solar-battery-forecast-plan
+solar-battery-reconciliation solar-battery-dashboard`; increase the LXC allocation, rather than
+silently removing a unit limit, if Linux soak tests at the intended property/array count and
+dashboard concurrency show sustained `MemoryCurrent` close to a ceiling.
+
 ## Upgrade and rollback
 
 Stop only the service being upgraded, verify the new release artifacts, install the new wheel with

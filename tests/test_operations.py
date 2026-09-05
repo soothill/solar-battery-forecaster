@@ -11,6 +11,7 @@ from solar_battery_forecaster.operations import (
     ReconciliationOperation,
     cheap_window,
     covered_duration_hours,
+    validated_tariff_timeline,
 )
 
 
@@ -44,6 +45,26 @@ def test_tariff_coverage_stops_at_a_gap() -> None:
         ),
     ]
     assert covered_duration_hours(intervals, start, start + timedelta(hours=2)) == 0.5
+
+
+def test_tariff_timeline_allows_boundaries_and_rejects_overlap() -> None:
+    start = datetime(2026, 9, 5, tzinfo=UTC)
+    boundary = [
+        TariffInterval(start, start + timedelta(minutes=30), 5, True),
+        TariffInterval(
+            start + timedelta(minutes=30), start + timedelta(hours=1), 15, False
+        ),
+    ]
+    assert validated_tariff_timeline(list(reversed(boundary))) == boundary
+
+    overlapping = [
+        boundary[0],
+        TariffInterval(
+            start + timedelta(minutes=29), start + timedelta(hours=1), 15, False
+        ),
+    ]
+    with pytest.raises(ValueError, match="overlap"):
+        validated_tariff_timeline(overlapping)
 
 
 @pytest.mark.asyncio

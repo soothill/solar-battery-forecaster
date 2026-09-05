@@ -8,6 +8,7 @@ import httpx
 from solar_battery_forecaster.config import TariffConfig
 from solar_battery_forecaster.models import TariffInterval
 from solar_battery_forecaster.outbound import RequestPacer, default_pacer
+from solar_battery_forecaster.tariffs import validated_tariff_timeline
 
 BASE_URL = "https://api.octopus.energy/v1"
 MAX_TARIFF_INTERVALS = 100
@@ -39,7 +40,7 @@ class OctopusTariff:
             f"{BASE_URL}/products/{self.config.product_code}/electricity-tariffs/"
             f"{self.config.tariff_code}/standard-unit-rates/"
         )
-        response = await self._pacer.request(
+        payload = await self._pacer.request_json(
             self._client,
             "GET",
             url,
@@ -50,7 +51,9 @@ class OctopusTariff:
                 "page_size": 100,
             },
         )
-        rows = response.json().get("results", [])
+        if not isinstance(payload, dict):
+            raise ValueError("tariff provider returned an invalid response")
+        rows = payload.get("results", [])
         if not isinstance(rows, list) or len(rows) > MAX_TARIFF_INTERVALS:
             raise ValueError("tariff provider returned an invalid interval list")
         intervals: list[TariffInterval] = []
@@ -71,4 +74,4 @@ class OctopusTariff:
                     is_cheap=price <= self.config.cheap_rate_threshold_pence,
                 )
             )
-        return sorted(intervals, key=lambda item: item.start)
+        return validated_tariff_timeline(intervals)

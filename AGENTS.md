@@ -27,3 +27,6 @@ loaded. Memory contains durable, reviewed lessons and decisions only. Never stor
 property addresses or coordinates, serial numbers, account identifiers, raw customer payloads,
 approval state, or personal data in repository memory.
 
+Keep handoffs concise and batch related findings. Run local preflight before handing off, do not
+repeat unchanged gates, and minimize agent turns and GitHub Actions jobs without weakening the
+mandatory sequence. Record decisions and evidence, never private chain-of-thought.
