@@ -1,8 +1,14 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import get_type_hints
 
 from solar_battery_forecaster.models import BatteryDecision
-from solar_battery_forecaster.storage import InfluxStore
+from solar_battery_forecaster.storage import DeliveryDisposition, InfluxStore
+
+
+def test_store_delivery_return_annotations_match_runtime_contract() -> None:
+    assert get_type_hints(InfluxStore.__init__)["return"] is type(None)
+    assert get_type_hints(InfluxStore._write)["return"] == DeliveryDisposition
 
 
 class ForecastRecord:
@@ -43,7 +49,7 @@ def test_decision_persists_input_provenance() -> None:
     buckets: list[str] = []
     store = object.__new__(InfluxStore)
 
-    def capture(bucket: str, points: list[object]) -> None:
+    def capture(bucket: str, points: list[object], **metadata: object) -> None:
         buckets.append(bucket)
         captured.extend(points)
 

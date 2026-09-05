@@ -27,7 +27,8 @@ and again before planning stored data. Sigenergy's nested `data` encoding has ti
 byte, object-shape, node, and depth bounds before telemetry normalization.
 
 Properties run sequentially with configurable phase spacing. Forecast-plan and reconciliation
-scan for due work, catch up missed runs, and check durable InfluxDB markers before writing.
+scan for due work, catch up missed runs, and check durable InfluxDB or local outbox markers before
+writing.
 Forecast-plan reads a complete, fresh stored tariff window and never calls Octopus. Log messages
 identify only the operation, configured property ID, and exception class; provider URLs,
 coordinates, system IDs, and response bodies are excluded.
@@ -42,6 +43,9 @@ coordinates, system IDs, and response bodies are excluded.
 - Telemetry, tariff, and planning data use separate buckets because InfluxDB authorization is
   bucket-scoped. Worker tokens receive only their required bucket operations.
 - Tariff collection must run often enough to satisfy the configured freshness bound.
-- InfluxDB is the handoff and idempotency boundary between workers.
+- InfluxDB remains the inter-worker handoff boundary. Each writing worker uses the private fallback
+  outbox specified by ADR 0002 after a failed or ambiguous direct attempt, and queues behind an
+  existing same-property backlog. Pending local logical markers extend the writer's idempotency
+  boundary across an InfluxDB outage.
 - Catch-up work increases request volume gradually because pacing and property phasing still apply.
 - Version 0.1 remains recommendation-only; none of these workers can control a battery.

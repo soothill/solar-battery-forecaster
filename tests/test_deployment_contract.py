@@ -33,9 +33,22 @@ def test_five_workers_have_independent_restart_contracts() -> None:
         group = unit["Service"]["Group"]
         assert user == group
         assert user == identity_by_environment[Path(environment_file).name]
-        assert unit["Service"]["SupplementaryGroups"] == "solar-config"
+        expected_groups = (
+            "solar-config solar-observe" if user == "solar-dashboard" else "solar-config"
+        )
+        assert unit["Service"]["SupplementaryGroups"] == expected_groups
         identities.add((user, group))
         memory_limits[user] = unit["Service"]["MemoryMax"]
+        if user == "solar-dashboard":
+            assert "StateDirectory" not in unit["Service"]
+            assert unit["Service"]["UMask"] == "0027"
+            assert unit["Service"]["ReadOnlyPaths"] == "/run/solar-battery-status"
+        else:
+            assert unit["Service"]["StateDirectory"] == path.stem
+            assert unit["Service"]["StateDirectoryMode"] == "0700"
+            assert unit["Service"]["UMask"] == "0077"
+        scope = Path(environment_file).stem
+        assert unit["Service"]["ReadWritePaths"] == f"/run/solar-battery-status/{scope}"
 
         argv = shlex.split(unit["Service"]["ExecStart"])
         program = Path(argv[0]).name
@@ -73,9 +86,7 @@ def test_five_workers_have_independent_restart_contracts() -> None:
 
 
 def test_deployment_assigns_each_secret_file_to_only_its_service_group() -> None:
-    deployment = (Path(__file__).parents[1] / "deployment" / "LXC.md").read_text(
-        encoding="utf-8"
-    )
+    deployment = (Path(__file__).parents[1] / "deployment" / "LXC.md").read_text(encoding="utf-8")
     owners = {
         "telemetry.env": "solar-telemetry",
         "tariff.env": "solar-tariff",
@@ -94,3 +105,62 @@ def test_deployment_assigns_each_secret_file_to_only_its_service_group() -> None
             rf"\s+/etc/solar-battery-forecaster/{re.escape(environment_file)}"
         )
         assert instruction.search(deployment)
+
+
+def test_writer_environment_files_bind_private_outbox_directories() -> None:
+    root = Path(__file__).parents[1]
+    for worker in ["telemetry", "tariff", "forecast-plan", "reconciliation"]:
+        environment = (root / "deployment" / "environment" / f"{worker}.env.example").read_text(
+            encoding="utf-8"
+        )
+        assert f"OUTBOX_STATE_DIRECTORY=/var/lib/solar-battery-{worker}" in environment
+        assert f"STATUS_DIRECTORY=/run/solar-battery-status/{worker}" in environment
+    dashboard = (root / "deployment" / "environment" / "dashboard.env.example").read_text(
+        encoding="utf-8"
+    )
+    assert "OUTBOX_STATE_DIRECTORY" not in dashboard
+    assert "STATUS_DIRECTORY=/run/solar-battery-status/dashboard" in dashboard
+
+
+def test_status_runtime_directories_have_one_way_dashboard_read_access() -> None:
+    root = Path(__file__).parents[1]
+    deployment = (root / "deployment" / "LXC.md").read_text(encoding="utf-8")
+    tmpfiles = (root / "deployment" / "solar-battery-status.tmpfiles").read_text(encoding="utf-8")
+    assert "groupadd --system solar-observe" in deployment
+    assert "--groups solar-config,solar-observe solar-dashboard" in deployment
+    assert (
+        "--groups solar-config,solar-observe"
+        not in deployment.split("groupadd --system solar-dashboard")[0]
+    )
+    for service in [
+        "telemetry",
+        "tariff",
+        "forecast-plan",
+        "reconciliation",
+        "dashboard",
+    ]:
+        assert f"/run/solar-battery-status/{service} 2750 solar-{service} solar-observe" in tmpfiles
+
+
+def test_mobile_status_ui_exposes_delivery_and_syslog_health_without_html_injection() -> None:
+    app = (
+        Path(__file__).parents[1]
+        / "src"
+        / "solar_battery_forecaster"
+        / "static"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+    for field in [
+        "last_cycle_result",
+        "last_direct_delivery_at",
+        "last_buffered_at",
+        "pending_bytes",
+        "oldest_pending_age_seconds",
+        "blocked_streams",
+        "quarantined_records",
+        "syslog.dropped",
+        "syslog.last_failure_at",
+    ]:
+        assert field in app
+    assert "textContent" in app
+    assert "innerHTML" not in app

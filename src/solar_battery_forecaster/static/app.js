@@ -2,6 +2,9 @@ const canvas = document.querySelector("#curve");
 const dayInput = document.querySelector("#day");
 const propertyInput = document.querySelector("#property");
 const statusEl = document.querySelector("#status");
+const processesEl = document.querySelector("#processes");
+const logMessagesEl = document.querySelector("#log-messages");
+const statusUpdatedEl = document.querySelector("#status-updated");
 let payload;
 
 const css = getComputedStyle(document.documentElement);
@@ -93,6 +96,89 @@ async function start() {
     option.selected = item.id === requested; propertyInput.append(option);
   });
   await loadCurve();
+  await loadStatus();
+  window.setInterval(loadStatus, 30000);
+}
+
+function formatTime(value) {
+  return value ? new Date(value).toLocaleString() : "Never";
+}
+
+function addText(parent, tag, text, className) {
+  const element = document.createElement(tag);
+  element.textContent = text;
+  if (className) element.className = className;
+  parent.append(element);
+  return element;
+}
+
+function compactBytes(value) {
+  if (value === null || value === undefined) return "—";
+  if (value < 1024) return `${value} B`;
+  return `${(value / 1024).toFixed(1)} KiB`;
+}
+
+function compactAge(value) {
+  if (value === null || value === undefined) return "—";
+  if (value < 60) return `${Math.round(value)}s`;
+  if (value < 3600) return `${Math.round(value / 60)}m`;
+  return `${(value / 3600).toFixed(1)}h`;
+}
+
+function processState(service) {
+  if (service.lifecycle === "stopped") return "stopped";
+  if (service.stale || service.lifecycle === "missing") return "stale";
+  if (service.last_cycle_result === "failed") return "failed";
+  const outbox = service.outbox || {};
+  if (outbox.delivery_paused || outbox.quarantined_records || outbox.blocked_streams) return "blocked";
+  if (outbox.pending_records) return "backlog";
+  return service.lifecycle || "unknown";
+}
+
+function renderStatus(data) {
+  processesEl.replaceChildren();
+  logMessagesEl.replaceChildren();
+  const events = [];
+  data.services.forEach(service => {
+    const card = document.createElement("article");
+    const state = processState(service);
+    const outbox = service.outbox || {};
+    const syslog = service.syslog || {};
+    addText(card, "strong", service.service, "process-name");
+    addText(card, "span", state, `pill ${state}`);
+    addText(card, "small", `Last cycle: ${formatTime(service.last_cycle_completed_at)} · ${service.last_cycle_result || "never"}`);
+    addText(card, "small", `Last accepted: ${formatTime(service.last_local_accepted_at)}`);
+    addText(card, "small", `Last direct: ${formatTime(service.last_direct_delivery_at)}`);
+    addText(card, "small", `Last buffered: ${formatTime(service.last_buffered_at)}`);
+    addText(card, "small", `Last confirmed: ${formatTime(service.last_confirmed_delivery_at)}`);
+    if (service.outbox) {
+      addText(card, "small", `Fallback: ${outbox.pending_records ?? 0} record(s) · ${compactBytes(outbox.pending_bytes)} · oldest ${compactAge(outbox.oldest_pending_age_seconds)}`);
+      addText(card, "small", `Blocked: ${outbox.blocked_streams ?? 0} · quarantine: ${outbox.quarantined_records ?? 0}`);
+    }
+    addText(card, "small", `Syslog: ${syslog.enabled ? "enabled" : "off"} · dropped ${syslog.dropped ?? 0} · last failure ${formatTime(syslog.last_failure_at)}`);
+    processesEl.append(card);
+    (service.events || []).forEach(event => events.push({...event, service: service.service}));
+  });
+  events.sort((left, right) => String(right.at).localeCompare(String(left.at)));
+  events.slice(0, 50).forEach(event => {
+    const row = document.createElement("div");
+    addText(row, "time", formatTime(event.at));
+    addText(row, "strong", `${event.service} · ${event.severity}`);
+    addText(row, "span", event.message);
+    logMessagesEl.append(row);
+  });
+  if (!events.length) addText(logMessagesEl, "p", "No recent messages.", "note");
+  statusUpdatedEl.textContent = `Updated ${formatTime(data.generated_at)}`;
+}
+
+async function loadStatus() {
+  try {
+    const response = await fetch("/api/status", {cache: "no-store"});
+    if (!response.ok) throw new Error("Status unavailable");
+    renderStatus(await response.json());
+  } catch (error) {
+    statusUpdatedEl.textContent = error.message;
+  }
 }
 
 dayInput.addEventListener("change", loadCurve);

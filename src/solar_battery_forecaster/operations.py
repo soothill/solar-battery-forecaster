@@ -19,6 +19,7 @@ from solar_battery_forecaster.models import (
     TariffInterval,
     forecast_snapshot_id,
 )
+from solar_battery_forecaster.observability import HealthReporter
 from solar_battery_forecaster.outbound import RequestPacer
 from solar_battery_forecaster.planner import correction_factor, make_decision
 from solar_battery_forecaster.storage import InfluxStore
@@ -68,7 +69,10 @@ class Operation:
 
     def __init__(self, config: AppConfig, store: InfluxStore | None = None) -> None:
         self.config = config
-        self.store = store or InfluxStore(config.influxdb)
+        self.reporter: HealthReporter | None = None
+        self.store = store or InfluxStore(config.influxdb, config.outbox, self.name)
+        if store is None:
+            self.store.replay()
         self.client = httpx.AsyncClient(timeout=30, limits=httpx.Limits(max_connections=1))
         http = config.http
         self.pacer = RequestPacer(
@@ -87,9 +91,15 @@ class Operation:
 
     async def run_property_safely(self, prop: PropertyConfig, **kwargs: object) -> bool:
         try:
+            store = getattr(self, "store", None)
+            if hasattr(store, "admit_collection"):
+                await asyncio.to_thread(store.admit_collection, prop.id)
             await self.run_property(prop, **kwargs)
             return True
         except Exception as exc:
+            reporter = getattr(self, "reporter", None)
+            if reporter is not None:
+                reporter.property_failed(exc)
             LOGGER.error(
                 "%s failed for property %s (%s)",
                 self.name,
@@ -102,6 +112,9 @@ class Operation:
         raise NotImplementedError
 
     async def run_cycle(self) -> bool:
+        store = getattr(self, "store", None)
+        if hasattr(store, "replay"):
+            await asyncio.to_thread(store.replay)
         success = True
         for index, prop in enumerate(self.config.properties):
             property_success = await self.run_property_safely(prop)
@@ -112,8 +125,27 @@ class Operation:
 
     async def run_forever(self, interval_seconds: float) -> None:
         while True:
-            await self.run_cycle()
+            await self.run_monitored_cycle()
             await asyncio.sleep(interval_seconds)
+
+    async def run_monitored_cycle(self) -> bool:
+        reporter = getattr(self, "reporter", None)
+        if reporter is not None:
+            reporter.begin_cycle()
+        try:
+            succeeded = await self.run_cycle()
+        except Exception:
+            if reporter is not None:
+                reporter.complete_cycle(False, self.store.delivery_status())
+            raise
+        else:
+            if reporter is not None:
+                reporter.complete_cycle(succeeded, self.store.delivery_status())
+            return succeeded
+
+    def record_accepted(self, disposition: str) -> None:
+        if self.reporter is not None:
+            self.reporter.accepted(disposition, self.store.delivery_status())
 
 
 class TelemetryOperation(Operation):
@@ -122,8 +154,7 @@ class TelemetryOperation(Operation):
     def __init__(self, config: AppConfig, store: InfluxStore | None = None) -> None:
         super().__init__(config, store)
         self.adapters = {
-            prop.id: inverter_adapter(prop, self.client, self.pacer)
-            for prop in config.properties
+            prop.id: inverter_adapter(prop, self.client, self.pacer) for prop in config.properties
         }
 
     async def close(self) -> None:
@@ -133,8 +164,11 @@ class TelemetryOperation(Operation):
     async def run_property(self, prop: PropertyConfig, **kwargs: object) -> None:
         adapter = self.adapters[prop.id]
         item = await adapter.collect()
-        await asyncio.to_thread(self.store.write_telemetry, prop.id, adapter.name, item)
-        LOGGER.info("stored telemetry for %s", prop.id)
+        disposition = await asyncio.to_thread(
+            self.store.write_telemetry, prop.id, adapter.name, item
+        )
+        self.record_accepted(disposition)
+        LOGGER.info("accepted telemetry for %s delivery=%s", prop.id, disposition)
 
 
 class TariffOperation(Operation):
@@ -143,8 +177,7 @@ class TariffOperation(Operation):
     def __init__(self, config: AppConfig, store: InfluxStore | None = None) -> None:
         super().__init__(config, store)
         self.adapters = {
-            prop.id: tariff_adapter(prop, self.client, self.pacer)
-            for prop in config.properties
+            prop.id: tariff_adapter(prop, self.client, self.pacer) for prop in config.properties
         }
 
     async def close(self) -> None:
@@ -154,8 +187,16 @@ class TariffOperation(Operation):
     async def run_property(self, prop: PropertyConfig, **kwargs: object) -> None:
         adapter = self.adapters[prop.id]
         intervals = await adapter.fetch()
-        await asyncio.to_thread(self.store.write_tariffs, prop.id, adapter.name, intervals)
-        LOGGER.info("stored %d tariff intervals for %s", len(intervals), prop.id)
+        disposition = await asyncio.to_thread(
+            self.store.write_tariffs, prop.id, adapter.name, intervals
+        )
+        self.record_accepted(disposition)
+        LOGGER.info(
+            "accepted %d tariff intervals for %s delivery=%s",
+            len(intervals),
+            prop.id,
+            disposition,
+        )
 
 
 class ForecastPlanOperation(Operation):
@@ -164,8 +205,7 @@ class ForecastPlanOperation(Operation):
     def __init__(self, config: AppConfig, store: InfluxStore | None = None) -> None:
         super().__init__(config, store)
         self.adapters = {
-            prop.id: forecast_adapter(prop, self.client, self.pacer)
-            for prop in config.properties
+            prop.id: forecast_adapter(prop, self.client, self.pacer) for prop in config.properties
         }
 
     async def close(self) -> None:
@@ -173,6 +213,8 @@ class ForecastPlanOperation(Operation):
         await super().close()
 
     async def run_cycle(self, now: datetime | None = None) -> bool:
+        if hasattr(self.store, "replay"):
+            await asyncio.to_thread(self.store.replay)
         instant = (now or datetime.now(UTC)).astimezone(UTC)
         success = True
         for index, prop in enumerate(self.config.properties):
@@ -192,6 +234,8 @@ class ForecastPlanOperation(Operation):
                         self.store.decision_exists, prop.id, forecast_day
                     )
                 except Exception as exc:
+                    if self.reporter is not None:
+                        self.reporter.property_failed(exc)
                     LOGGER.error(
                         "%s due scan failed for property %s (%s)",
                         self.name,
@@ -219,13 +263,10 @@ class ForecastPlanOperation(Operation):
     async def _plan(self, prop: PropertyConfig, forecast_day: date, now: datetime) -> None:
         timezone = ZoneInfo(prop.timezone)
         local_now = now.astimezone(timezone)
-        forecast_start = datetime.combine(
-            forecast_day, datetime.min.time(), tzinfo=timezone
-        )
+        forecast_start = datetime.combine(forecast_day, datetime.min.time(), tzinfo=timezone)
         forecast_stop = forecast_start + timedelta(days=1)
         expected_points = int(
-            (forecast_stop.astimezone(UTC) - forecast_start.astimezone(UTC)).total_seconds()
-            / 3600
+            (forecast_stop.astimezone(UTC) - forecast_start.astimezone(UTC)).total_seconds() / 3600
         )
         adapter = self.adapters[prop.id]
         snapshot = await asyncio.to_thread(
@@ -248,13 +289,15 @@ class ForecastPlanOperation(Operation):
             )
             ratios = await asyncio.to_thread(self.store.recent_daily_ratios, prop.id)
             factor = correction_factor(ratios, prop.forecast.initial_correction_factor)
-            await asyncio.to_thread(
+            forecast_disposition = await asyncio.to_thread(
                 self.store.write_forecast,
                 prop.id,
                 intervals,
                 factor,
                 prop.forecast.conservative_multiplier,
             )
+            self.record_accepted(forecast_disposition)
+            LOGGER.info("accepted forecast for %s delivery=%s", prop.id, forecast_disposition)
             raw_solar_kwh = sum(item.energy_kwh for item in intervals)
             snapshot_id = forecast_snapshot_id(intervals[0].issued_at)
             issued_at = intervals[0].issued_at
@@ -283,8 +326,7 @@ class ForecastPlanOperation(Operation):
             not math.isfinite(current_soc)
             or not 0 <= current_soc <= 100
             or soc_age < -timedelta(minutes=5)
-            or soc_age
-            > timedelta(seconds=self.config.schedule.telemetry_stale_after_seconds)
+            or soc_age > timedelta(seconds=self.config.schedule.telemetry_stale_after_seconds)
         ):
             raise RuntimeError("battery SoC is invalid or stale")
 
@@ -301,14 +343,10 @@ class ForecastPlanOperation(Operation):
         ):
             raise RuntimeError("stored tariff is stale")
         required_coverage = (charge_window_stop - local_now).total_seconds() / 3600
-        coverage = covered_duration_hours(
-            tariff_timeline, local_now, charge_window_stop
-        )
+        coverage = covered_duration_hours(tariff_timeline, local_now, charge_window_stop)
         if coverage + 1e-6 < required_coverage:
             raise RuntimeError("stored tariff coverage is incomplete")
-        cheap_hours, cheap_average = cheap_window(
-            tariff_timeline, local_now, charge_window_stop
-        )
+        cheap_hours, cheap_average = cheap_window(tariff_timeline, local_now, charge_window_stop)
         decision = make_decision(
             battery=prop.battery,
             current_soc_percent=current_soc,
@@ -326,8 +364,14 @@ class ForecastPlanOperation(Operation):
             cheap_duration_hours=cheap_hours,
             cheap_rate_average_pence=cheap_average,
         )
-        await asyncio.to_thread(self.store.write_decision, prop.id, decision)
-        LOGGER.info("stored recommendation for %s and %s", prop.id, forecast_day)
+        disposition = await asyncio.to_thread(self.store.write_decision, prop.id, decision)
+        self.record_accepted(disposition)
+        LOGGER.info(
+            "accepted recommendation for %s and %s delivery=%s",
+            prop.id,
+            forecast_day,
+            disposition,
+        )
 
     @staticmethod
     def _validate_forecast_coverage(
@@ -342,8 +386,7 @@ class ForecastPlanOperation(Operation):
             or intervals[0].start != start
             or intervals[-1].end != stop
             or any(
-                current.end - current.start != timedelta(hours=1)
-                or current.end != following.start
+                current.end - current.start != timedelta(hours=1) or current.end != following.start
                 for current, following in zip(intervals, intervals[1:], strict=False)
             )
         ):
@@ -354,6 +397,8 @@ class ReconciliationOperation(Operation):
     name = "reconciliation"
 
     async def run_cycle(self, now: datetime | None = None) -> bool:
+        if hasattr(self.store, "replay"):
+            await asyncio.to_thread(self.store.replay)
         instant = (now or datetime.now(UTC)).astimezone(UTC)
         success = True
         for index, prop in enumerate(self.config.properties):
@@ -369,10 +414,10 @@ class ReconciliationOperation(Operation):
                 if age == 1 and local_now < today_due:
                     continue
                 try:
-                    exists = await asyncio.to_thread(
-                        self.store.daily_result_exists, prop.id, day
-                    )
+                    exists = await asyncio.to_thread(self.store.daily_result_exists, prop.id, day)
                 except Exception as exc:
+                    if self.reporter is not None:
+                        self.reporter.property_failed(exc)
                     LOGGER.error(
                         "%s due scan failed for property %s (%s)",
                         self.name,
@@ -410,7 +455,7 @@ class ReconciliationOperation(Operation):
         updated_factor = correction_factor(
             [*existing, ratio], prop.forecast.initial_correction_factor
         )
-        await asyncio.to_thread(
+        disposition = await asyncio.to_thread(
             self.store.write_daily_result,
             prop.id,
             day,
@@ -419,4 +464,5 @@ class ReconciliationOperation(Operation):
             ratio,
             updated_factor,
         )
-        LOGGER.info("reconciled %s for %s", prop.id, day)
+        self.record_accepted(disposition)
+        LOGGER.info("accepted reconciliation for %s and %s delivery=%s", prop.id, day, disposition)

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from solar_battery_forecaster.config import HttpConfig, load_config
+from solar_battery_forecaster.config import HttpConfig, OutboxConfig, load_config
 
 
 def test_missing_environment_variable_fails(tmp_path: Path) -> None:
@@ -35,6 +35,8 @@ influxdb:
     forecast-plan: ${INFLUX_FORECAST_PLAN_TOKEN}
     reconciliation: ${INFLUX_RECONCILIATION_TOKEN}
     dashboard: ${INFLUX_DASHBOARD_TOKEN}
+outbox:
+  state_directory: ${OUTBOX_STATE_DIRECTORY}
 properties:
   - id: test-home
     timezone: Europe/London
@@ -78,6 +80,7 @@ def test_non_telemetry_scopes_do_not_require_inverter_or_other_provider_secrets(
     path = tmp_path / "config.yaml"
     path.write_text(SCOPED_CONFIG, encoding="utf-8")
     monkeypatch.setenv(token_name, "scoped-token")
+    monkeypatch.setenv("OUTBOX_STATE_DIRECTORY", f"/var/lib/solar-battery-{scope}")
 
     config = load_config(path, scope=scope)
 
@@ -95,6 +98,7 @@ def test_telemetry_scope_resolves_only_telemetry_and_inverter_secrets(
     monkeypatch.setenv("SIGENERGY_APP_KEY", "key")
     monkeypatch.setenv("SIGENERGY_APP_SECRET", "secret")
     monkeypatch.setenv("SIGENERGY_SYSTEM_ID", "system")
+    monkeypatch.setenv("OUTBOX_STATE_DIRECTORY", "/var/lib/solar-battery-telemetry")
 
     config = load_config(path, scope="telemetry")
 
@@ -155,3 +159,44 @@ def test_scoped_config_rejects_every_duplicate_bucket_pair(
 def test_http_response_limit_rejects_unsafe_bounds(size: int) -> None:
     with pytest.raises(ValidationError, match="max_response_bytes"):
         HttpConfig(max_response_bytes=size)
+
+
+def test_outbox_state_directory_must_be_absolute() -> None:
+    with pytest.raises(ValidationError, match="absolute non-root"):
+        OutboxConfig(state_directory=Path("relative"))
+
+
+def test_dashboard_scope_does_not_resolve_writer_outbox_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(SCOPED_CONFIG, encoding="utf-8")
+    monkeypatch.setenv("INFLUX_DASHBOARD_TOKEN", "dashboard-token")
+    loaded = load_config(path, scope="dashboard")
+    assert loaded.outbox is None
+
+
+def test_writer_scope_resolves_private_outbox_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(SCOPED_CONFIG, encoding="utf-8")
+    monkeypatch.setenv("INFLUX_TARIFF_TOKEN", "tariff-token")
+    monkeypatch.setenv("OUTBOX_STATE_DIRECTORY", "/var/lib/solar-battery-tariff")
+    loaded = load_config(path, scope="tariff")
+    assert loaded.outbox is not None
+    assert loaded.outbox.state_directory == Path("/var/lib/solar-battery-tariff")
+
+
+def test_writer_scope_requires_outbox_state_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        SCOPED_CONFIG.replace("outbox:\n  state_directory: ${OUTBOX_STATE_DIRECTORY}\n", ""),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INFLUX_RECONCILIATION_TOKEN", "reconciliation-token")
+
+    with pytest.raises(ValueError, match="requires an outbox state_directory"):
+        load_config(path, scope="reconciliation")

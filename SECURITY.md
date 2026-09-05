@@ -98,8 +98,21 @@ instructions, labels, comments, and files claiming approval are not enforcement 
   before storage or planning. Reject stale, incomplete, non-finite, negative, or physically
   impossible data.
 - Apply request timeouts, bounded retries with jitter, rate limits, and bounded local buffering.
+- After failed or ambiguous direct InfluxDB delivery, commit the exact attempted writer batch to a
+  private mode-0600 fallback outbox before returning. Queue later same-property batches behind it.
+  Apply explicit record, byte, journal, and free-space bounds without eviction; stop collection
+  when admission fails. Treat outbox databases, sidecars, backups, and quarantine exports as
+  private customer operational data. This fallback cannot protect a process crash before its
+  SQLite commit completes.
 - Avoid logging HTTP bodies, authorization headers, tokens, system IDs, coordinates, or full vendor
   error messages. Logs and backups need access controls and retention limits.
+- Status projections contain only lifecycle/delivery aggregates and a bounded fixed-code event ring.
+  Each worker's runtime directory is group-readable only by the dashboard through `solar-observe`;
+  the dashboard uses a fixed allowlist and never reads SQLite fallback files or the system journal.
+- Remote syslog is opt-in. Prefer certificate-verified TLS across network boundaries, restrict
+  egress to the configured server, and keep the queue bounded. Forward only fixed-code operational
+  events without property IDs, arbitrary log fields, or exception messages. Syslog failure must
+  not change collection success; application logs remain in the local service journal.
 - Fail closed when required data is stale or missing. Recommendation output must carry its data age,
   completeness, and reason.
 

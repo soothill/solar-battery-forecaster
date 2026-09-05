@@ -23,6 +23,34 @@ http:
   retry_after_max_seconds: 300
   jitter_seconds: 0.5
 
+outbox:
+  # Each writer resolves this from its private service environment file.
+  state_directory: ${OUTBOX_STATE_DIRECTORY}
+  database_max_bytes: 134217728
+  max_record_bytes: 2097152
+  max_records: 100000
+  filesystem_min_free_bytes: 268435456
+  journal_headroom_bytes: 8388608
+  collection_reserve_bytes: 2097152
+  drain_max_records: 32
+  drain_max_bytes: 8388608
+  retry_base_seconds: 5
+  retry_max_seconds: 300
+
+observability:
+  # Each service resolves its own group-readable runtime directory.
+  status_directory: ${STATUS_DIRECTORY}
+  heartbeat_seconds: 30
+  stale_after_seconds: 90
+  syslog:
+    enabled: false
+    host: syslog.example.invalid
+    port: 6514
+    # tls verifies the server certificate and is recommended outside a trusted LAN.
+    transport: tls
+    connect_timeout_seconds: 3
+    queue_size: 256
+
 schedule:
   telemetry_seconds: 300
   telemetry_stale_after_seconds: 900

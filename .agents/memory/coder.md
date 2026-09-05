@@ -58,3 +58,10 @@
 - 2026-09-05: Temporary legacy security checks reconstruct their scanners from a verified ancestor
   commit and tree with exact input hashes and tool versions; candidate code is scanned but never
   supplies or installs the bootstrap scanner environment.
+- 2026-09-05: Writer storage serializes each complete Influx batch once and sends it directly while
+  healthy. Failed/ambiguous attempts and same-property backlogs commit those exact bytes to a
+  private SQLite fallback; persisted logical markers prevent duplicate planning during outages.
+- 2026-09-05: Cross-process health uses atomic, bounded JSON projections with fixed-code operational
+  events in service-owned runtime directories. Arbitrary logs remain in journald; the dashboard
+  reads a fixed allowlist rather than peer SQLite or journals, and optional syslog uses a bounded
+  background queue and verified TLS without affecting collection.

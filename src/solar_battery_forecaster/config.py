@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 from copy import deepcopy
@@ -67,6 +68,87 @@ class HttpConfig(BaseModel):
     retry_after_max_seconds: float = Field(default=300, ge=1, le=3600)
     jitter_seconds: float = Field(default=0.5, ge=0, le=10)
     max_response_bytes: int = Field(default=1_048_576, ge=16_384, le=8_388_608)
+
+
+class OutboxConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    state_directory: Path | None = None
+    database_max_bytes: int = Field(default=134_217_728, ge=1_048_576, le=2_147_483_648)
+    max_record_bytes: int = Field(default=2_097_152, ge=16_384, le=16_777_216)
+    max_records: int = Field(default=100_000, ge=100, le=10_000_000)
+    filesystem_min_free_bytes: int = Field(default=268_435_456, ge=16_777_216, le=17_179_869_184)
+    journal_headroom_bytes: int = Field(default=8_388_608, ge=1_048_576, le=268_435_456)
+    collection_reserve_bytes: int = Field(default=2_097_152, ge=16_384, le=16_777_216)
+    drain_max_records: int = Field(default=32, ge=1, le=1000)
+    drain_max_bytes: int = Field(default=8_388_608, ge=16_384, le=67_108_864)
+    retry_base_seconds: float = Field(default=5, ge=1, le=300)
+    retry_max_seconds: float = Field(default=300, ge=1, le=3600)
+
+    @model_validator(mode="after")
+    def check_outbox_bounds(self) -> OutboxConfig:
+        if self.state_directory is not None and (
+            not self.state_directory.is_absolute() or self.state_directory == Path("/")
+        ):
+            raise ValueError("outbox state directory must be an absolute non-root path")
+        if self.collection_reserve_bytes < self.max_record_bytes:
+            raise ValueError("outbox collection reserve must cover one maximum record")
+        if self.collection_reserve_bytes + self.journal_headroom_bytes > self.database_max_bytes:
+            raise ValueError("outbox collection and journal reserves exceed database capacity")
+        if self.drain_max_bytes < self.max_record_bytes:
+            raise ValueError("outbox drain byte limit must cover one maximum record")
+        if self.retry_base_seconds > self.retry_max_seconds:
+            raise ValueError("outbox retry base must not exceed maximum")
+        return self
+
+
+class SyslogConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    host: str | None = None
+    port: int = Field(default=6514, ge=1, le=65535)
+    transport: Literal["udp", "tcp", "tls"] = "tls"
+    connect_timeout_seconds: float = Field(default=3, ge=0.1, le=30)
+    queue_size: int = Field(default=256, ge=10, le=5000)
+
+    @model_validator(mode="after")
+    def validate_destination(self) -> SyslogConfig:
+        if not self.enabled:
+            return self
+        if (
+            not self.host
+            or len(self.host) > 253
+            or any(character.isspace() or character in "/\\" for character in self.host)
+        ):
+            raise ValueError("enabled syslog requires a valid host")
+        try:
+            ipaddress.ip_address(self.host)
+        except ValueError:
+            labels = self.host.rstrip(".").split(".")
+            if any(
+                not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+                for label in labels
+            ):
+                raise ValueError("enabled syslog requires a valid host") from None
+        return self
+
+
+class ObservabilityConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status_directory: Path | None = None
+    heartbeat_seconds: int = Field(default=30, ge=10, le=300)
+    stale_after_seconds: int = Field(default=90, ge=30, le=900)
+    syslog: SyslogConfig = Field(default_factory=SyslogConfig)
+
+    @model_validator(mode="after")
+    def validate_status_directory(self) -> ObservabilityConfig:
+        if self.status_directory is not None and (
+            not self.status_directory.is_absolute() or self.status_directory == Path("/")
+        ):
+            raise ValueError("status directory must be an absolute non-root path")
+        return self
 
 
 class ArrayConfig(BaseModel):
@@ -140,6 +222,8 @@ class PropertyConfig(BaseModel):
 class AppConfig(BaseModel):
     influxdb: InfluxConfig
     http: HttpConfig = Field(default_factory=HttpConfig)
+    outbox: OutboxConfig | None = None
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     properties: list[PropertyConfig] = Field(min_length=1)
 
@@ -188,6 +272,12 @@ def _prepare_scope(raw: dict[str, object], scope: ConfigScope) -> dict[str, obje
     if not isinstance(tokens, dict) or scope not in tokens:
         raise ValueError(f"influxdb token is not configured for {scope}")
     influx["token"] = tokens[scope]
+    if scope == "dashboard":
+        prepared.pop("outbox", None)
+    else:
+        outbox = prepared.get("outbox")
+        if not isinstance(outbox, dict) or "state_directory" not in outbox:
+            raise ValueError("writer configuration requires an outbox state_directory")
 
     owners = {
         "inverter": "telemetry",

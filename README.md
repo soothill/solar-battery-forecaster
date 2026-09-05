@@ -43,6 +43,13 @@ uses only fresh Octopus intervals already stored by the tariff worker. Provider 
 through a decompressed-byte and structural-complexity limit; ambiguous overlapping tariff
 intervals are rejected before they can affect charge duration or price calculations.
 
+Each writer normally sends exact InfluxDB line protocol directly. After a failed or ambiguous
+attempt, or while that property is already backlogged, it commits the same bytes to its bounded
+SQLite fallback outbox for idempotent replay. Collection stops visibly before disk reserves are
+breached, with no silent eviction. A healthy process can have an empty SQLite control database,
+but a confirmed direct success creates no payload row. The dashboard remains read-only and charts
+only data confirmed in InfluxDB; the scoped outbox CLI is authoritative for local backlog state.
+
 All timestamps are written in UTC. Property time zones are used only to define local days
 and schedules, which keeps half-hourly data correct over daylight-saving changes.
 
@@ -89,8 +96,9 @@ solar-battery-forecaster reconciliation --config config.yaml --once
 For continuous operation, run each command without `--once` in its own process. The supplied
 systemd units do this and intentionally have no failure coupling.
 
-The process boundary and pacing decisions are recorded in
-[`docs/adr/0001-isolated-workers-and-provider-pacing.md`](docs/adr/0001-isolated-workers-and-provider-pacing.md).
+The process boundary, pacing, and durable-delivery decisions are recorded in
+[`docs/adr/0001-isolated-workers-and-provider-pacing.md`](docs/adr/0001-isolated-workers-and-provider-pacing.md)
+and [`docs/adr/0002-durable-influx-outbox.md`](docs/adr/0002-durable-influx-outbox.md).
 
 ## Configuration
 
@@ -144,6 +152,16 @@ selector for multi-property installations.
 Run `solar-battery-dashboard --config config.yaml`, then open
 `http://127.0.0.1:8080/?property=example-home`. For use away from the LXC itself, keep the
 service on loopback and publish it through an authenticated HTTPS reverse proxy.
+
+The page also has a live status view for all five independent processes, with 30-second
+heartbeats, last cycle/accepted/confirmed-delivery times, fallback counts, and a bounded list of
+fixed operational events. `GET /api/status` exposes the same no-store JSON. The dashboard reads only
+fixed group-readable snapshots under `/run`, never another process's SQLite fallback or journal.
+
+Optional remote syslog supports UDP, TCP, and certificate-verified TLS. It is disabled by default
+and sends only the fixed operational event codes—never arbitrary application log messages or
+property identifiers. Its bounded background queue cannot delay collection. See
+[`deployment/LXC.md`](deployment/LXC.md) for permissions and firewall guidance.
 
 ## Safety and privacy
 

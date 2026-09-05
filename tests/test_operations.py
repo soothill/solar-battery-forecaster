@@ -51,17 +51,13 @@ def test_tariff_timeline_allows_boundaries_and_rejects_overlap() -> None:
     start = datetime(2026, 9, 5, tzinfo=UTC)
     boundary = [
         TariffInterval(start, start + timedelta(minutes=30), 5, True),
-        TariffInterval(
-            start + timedelta(minutes=30), start + timedelta(hours=1), 15, False
-        ),
+        TariffInterval(start + timedelta(minutes=30), start + timedelta(hours=1), 15, False),
     ]
     assert validated_tariff_timeline(list(reversed(boundary))) == boundary
 
     overlapping = [
         boundary[0],
-        TariffInterval(
-            start + timedelta(minutes=29), start + timedelta(hours=1), 15, False
-        ),
+        TariffInterval(start + timedelta(minutes=29), start + timedelta(hours=1), 15, False),
     ]
     with pytest.raises(ValueError, match="overlap"):
         validated_tariff_timeline(overlapping)
@@ -121,6 +117,42 @@ async def test_property_cycle_reports_failure_after_running_all_properties() -> 
 
     assert await operation.run_cycle() is False
     assert attempted == ["one", "two"]
+
+
+@pytest.mark.asyncio
+async def test_outbox_admission_failure_prevents_property_collection() -> None:
+    operation = object.__new__(Operation)
+    operation.name = "telemetry"
+    operation.store = SimpleNamespace(
+        admit_collection=lambda property_id: (_ for _ in ()).throw(RuntimeError("full"))
+    )
+    attempted: list[str] = []
+
+    async def record(prop: object, **kwargs: object) -> None:
+        attempted.append(prop.id)
+
+    operation.run_property = record
+    assert await operation.run_property_safely(SimpleNamespace(id="home")) is False
+    assert attempted == []
+
+
+@pytest.mark.asyncio
+async def test_cycle_replays_outbox_before_properties() -> None:
+    operation = object.__new__(Operation)
+    operation.config = SimpleNamespace(
+        properties=[SimpleNamespace(id="one")],
+        schedule=SimpleNamespace(property_phase_seconds=0),
+    )
+    events: list[str] = []
+    operation.store = SimpleNamespace(replay=lambda: events.append("replay"))
+
+    async def record(prop: object, **kwargs: object) -> bool:
+        events.append(prop.id)
+        return True
+
+    operation.run_property_safely = record
+    assert await operation.run_cycle() is True
+    assert events == ["replay", "one"]
 
 
 @pytest.mark.asyncio
@@ -234,9 +266,7 @@ async def test_forecast_scan_uses_local_tomorrow_across_dst_boundaries(
 async def test_reconciliation_scan_reports_due_job_failure() -> None:
     prop = SimpleNamespace(id="home", timezone="Europe/London")
     operation = object.__new__(ReconciliationOperation)
-    operation.store = SimpleNamespace(
-        daily_result_exists=lambda property_id, day: False
-    )
+    operation.store = SimpleNamespace(daily_result_exists=lambda property_id, day: False)
     operation.config = SimpleNamespace(
         properties=[prop],
         schedule=SimpleNamespace(

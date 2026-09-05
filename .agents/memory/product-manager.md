@@ -6,4 +6,6 @@
   totals, recommended target, and charge cost. The York curve is the visual reference.
 - 2026-09-05: Support self-hosted multi-property configuration; hosted tenant isolation is not yet
   supported.
-
+- 2026-09-05: Failed or backlogged InfluxDB writes need a visible bounded fallback queue that avoids
+  forecast refetch and recomputation. The direct-first design intentionally cannot guarantee a local
+  copy if the process crashes before the fallback commit.

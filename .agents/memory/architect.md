@@ -5,4 +5,6 @@
 - 2026-09-05: Preserve the exact forecast used for the overnight decision; later refreshes must not
   overwrite it.
 - 2026-09-05: All storage timestamps are UTC; property time zones define local schedules/days.
-
+- 2026-09-05: Four writer-private SQLite fallback outboxes preserve exact failed or backlogged
+  Influx batches with logical pending markers, per-property FIFO/fair replay, fail-closed bounds,
+  and quarantine. Healthy writes are direct and the dashboard remains read-only.

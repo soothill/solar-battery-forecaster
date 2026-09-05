@@ -64,11 +64,15 @@ a build backend or resolves `build-system.requires`.
 apt-get update
 apt-get install -y ca-certificates python3 python3-venv
 groupadd --system solar-config
-for identity in solar-telemetry solar-tariff solar-forecast-plan solar-reconciliation solar-dashboard; do
+groupadd --system solar-observe
+for identity in solar-telemetry solar-tariff solar-forecast-plan solar-reconciliation; do
   groupadd --system "$identity"
   useradd --system --home /nonexistent --shell /usr/sbin/nologin \
     --gid "$identity" --groups solar-config "$identity"
 done
+groupadd --system solar-dashboard
+useradd --system --home /nonexistent --shell /usr/sbin/nologin \
+  --gid solar-dashboard --groups solar-config,solar-observe solar-dashboard
 mkdir -p /opt/solar-battery-forecaster
 tar -xzf /tmp/solar-release/solar_battery_forecaster-0.1.0.tar.gz \
   --strip-components=1 -C /opt/solar-battery-forecaster
@@ -100,6 +104,10 @@ install -o root -g solar-dashboard -m 0640 \
 chown root:solar-config /etc/solar-battery-forecaster/config.yaml
 chmod 0640 /etc/solar-battery-forecaster/config.yaml
 cp /opt/solar-battery-forecaster/deployment/*.service /etc/systemd/system/
+install -o root -g root -m 0644 \
+  /opt/solar-battery-forecaster/deployment/solar-battery-status.tmpfiles \
+  /etc/tmpfiles.d/solar-battery-status.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/solar-battery-status.conf
 systemctl daemon-reload
 ```
 
@@ -147,6 +155,11 @@ check_isolation solar-dashboard dashboard
 All commands must exit zero. Also inspect `namei -l` for the configuration directory and confirm
 no service user is a member of another service's private group.
 
+The `solar-observe` group is a one-way read boundary: only `solar-dashboard` is a member. Each
+worker owns its setgid mode-2750 runtime directory with that group, writes one atomic mode-0640 sanitized
+status projection, and cannot read a peer directory. Verify this ownership and membership before
+starting the services.
+
 ## InfluxDB buckets and token permissions
 
 InfluxDB OSS 2.x permissions are bucket-level, so use the three configured buckets rather than
@@ -173,9 +186,61 @@ systemctl enable --now solar-battery-reconciliation
 systemctl enable --now solar-battery-dashboard
 ```
 
+The four writer units create separate mode-0700 state directories under `/var/lib` and run with
+`UMask=0077`; the dashboard creates no state directory. Confirm the database and any `-wal`/`-shm`
+sidecars are owned by the matching service identity and have no group/other permission:
+
+```bash
+for worker in telemetry tariff forecast-plan reconciliation; do
+  state="/var/lib/solar-battery-$worker"
+  namei -l "$state/outbox.sqlite3"
+  find "$state" -maxdepth 1 -type f -perm /077 -print -quit | grep -q . && exit 1 || true
+done
+```
+
+Each provider collection is admitted only while the configured record, byte, journal-headroom,
+collection-reserve, and filesystem-free-space limits can be maintained. There is no automatic age
+expiry or eviction. Alert on a nonzero pending count, any quarantine/blocked stream, repeated
+delivery failures, or declining free space. An empty SQLite schema/control database can exist while
+the worker is healthy, but confirmed direct writes create no payload rows. The dashboard deliberately
+cannot read peer-private state and displays only confirmed InfluxDB freshness; this scoped command is
+authoritative for local backlog. Inspect a writer as its own identity without exposing a peer token:
+
+```bash
+sudo -u solar-telemetry sh -c '
+  set -a
+  . /etc/solar-battery-forecaster/telemetry.env
+  set +a
+  exec /opt/solar-battery-forecaster/.venv/bin/solar-battery-forecaster \
+    outbox status --scope telemetry --config /etc/solar-battery-forecaster/config.yaml
+'
+```
+
+The other actions are `verify`, `drain`, `retry`, and `export-quarantine --output NEW_PATH`.
+`drain` deliberately bypasses the current retry timer but keeps record/byte limits. `retry` resets
+network-delivery attempts; it does not release checksum quarantine. Exports contain exact line
+protocol and property identifiers, are created mode 0600, and must be encrypted and access-limited
+as customer operational data. Never paste their contents into logs or issues.
+
 The units do not require or restart one another. The dashboard listens on `127.0.0.1:8088`; use an
 authenticated HTTPS reverse proxy for phone access. Direct `0.0.0.0` binding is suitable only on a
 trusted private LAN with firewall restrictions because version 0.1 has no authentication.
+
+The dashboard's **System status** section and `GET /api/status` show all five process heartbeats,
+last cycle result, last locally accepted item, last confirmed InfluxDB delivery, fallback totals,
+and up to 50 fixed-code operational events per process. Snapshots refresh every 30 seconds and become
+stale after 90 seconds. The dashboard reads only the five fixed status files; it cannot read SQLite
+fallback databases or the system journal. These snapshots are operational hints, not an audit log,
+and disappear when `/run` is recreated.
+
+Remote syslog is disabled by default. To enable it, set `observability.syslog.enabled: true` and
+configure the host, port, and `udp`, `tcp`, or `tls` transport. TLS uses the system CA store and
+verifies the destination certificate. Permit only the selected destination in the LXC firewall.
+Forwarding has a bounded queue and retry backoff: loss, delay, or overflow is reported in status but
+never changes collection success. Only fixed, allowlisted structured events are sent; arbitrary
+application log messages remain in journald. Status and syslog events never contain property IDs,
+exception messages, tokens, coordinates, account identifiers, raw provider payloads, or fallback
+contents.
 
 Each provider/worker unit has `MemoryMax=80M` and the dashboard has `MemoryMax=96M`. Their 416 MB
 aggregate ceiling leaves 96 MB of a 512 MB LXC for the OS and service manager while bounding a
@@ -189,10 +254,17 @@ dashboard concurrency show sustained `MemoryCurrent` close to a ceiling.
 
 ## Upgrade and rollback
 
-Stop only the service being upgraded, verify the new release artifacts, install the new wheel with
-the same `--no-deps --no-build-isolation` command, and restart it. Roll back by reinstalling the
-previous verified wheel. Schema additions are append-only in version 0.1; old measurements remain
-readable.
+Stop only the service being upgraded, run `outbox verify` as that identity, and back up its database
+plus WAL/SHM sidecars while stopped. Verify the new release artifacts, install the new wheel with the
+same `--no-deps --no-build-isolation` command, and restart it. Roll back only to a verified wheel
+whose documented outbox schema supports the on-disk `PRAGMA user_version`; preserve the complete
+state directory throughout. Version 0.1 uses schema 1 and fails closed on unknown versions rather
+than rewriting them. Old Influx measurements remain readable.
+
+Package uninstall must stop and disable the four writers before removing code or units. Preserve
+their `/var/lib/solar-battery-*` directories by default so pending and quarantined customer data is
+recoverable. Delete those directories only under an explicit retention decision after verified
+drain/export and backup; ordinary rollback or uninstall never removes them.
 
 Repository tests verify the five unit-file contracts, distinct identities and secret files, and
 absence of `Requires`/`PartOf` coupling. Deployment acceptance must additionally run the permission

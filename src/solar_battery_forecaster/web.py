@@ -13,6 +13,11 @@ from urllib.parse import parse_qs, urlsplit
 
 from solar_battery_forecaster.config import AppConfig, load_config
 from solar_battery_forecaster.dashboard import InfluxDashboardRepository
+from solar_battery_forecaster.observability import (
+    StatusRepository,
+    close_reporter,
+    create_reporter,
+)
 
 LOGGER = logging.getLogger(__name__)
 STATIC_ROOT = importlib.resources.files("solar_battery_forecaster").joinpath("static")
@@ -21,6 +26,7 @@ STATIC_ROOT = importlib.resources.files("solar_battery_forecaster").joinpath("st
 class DashboardHandler(BaseHTTPRequestHandler):
     config: AppConfig
     repository: InfluxDashboardRepository
+    status_repository: StatusRepository
 
     def _headers(self, status: HTTPStatus, content_type: str) -> None:
         self.send_response(status)
@@ -43,6 +49,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_api(self, path: str, query: dict[str, list[str]]) -> None:
+        if path == "/api/status":
+            self._json(HTTPStatus.OK, self.status_repository.read())
+            return
         if path == "/api/v1/properties":
             self._json(
                 HTTPStatus.OK,
@@ -106,12 +115,19 @@ def make_server(
     host: str,
     port: int,
     repository: InfluxDashboardRepository | None = None,
+    status_repository: StatusRepository | None = None,
 ) -> ThreadingHTTPServer:
     class BoundHandler(DashboardHandler):
         pass
 
     BoundHandler.config = config
     BoundHandler.repository = repository or InfluxDashboardRepository(config.influxdb)
+    if config.observability.status_directory is None and status_repository is None:
+        raise ValueError("dashboard status directory is not configured")
+    BoundHandler.status_repository = status_repository or StatusRepository(
+        config.observability.status_directory,  # type: ignore[arg-type]
+        config.observability.stale_after_seconds,
+    )
     return ThreadingHTTPServer((host, port), BoundHandler)
 
 
@@ -127,13 +143,19 @@ def main() -> None:
     logging.getLogger("urllib3").disabled = True
     logging.getLogger("influxdb_client").disabled = True
     config = load_config(args.config, scope="dashboard")
-    server = make_server(config, args.host, args.port)
+    reporter = create_reporter(
+        config.observability, "dashboard", [item.id for item in config.properties]
+    )
+    server: ThreadingHTTPServer | None = None
     try:
+        server = make_server(config, args.host, args.port)
         LOGGER.info("dashboard listening on http://%s:%d", args.host, args.port)
         server.serve_forever()
     finally:
-        server.server_close()
-        server.RequestHandlerClass.repository.close()
+        if server is not None:
+            server.server_close()
+            server.RequestHandlerClass.repository.close()
+        close_reporter(reporter)
 
 
 if __name__ == "__main__":

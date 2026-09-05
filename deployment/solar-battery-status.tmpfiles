@@ -1,0 +1,6 @@
+d /run/solar-battery-status 0711 root root -
+d /run/solar-battery-status/telemetry 2750 solar-telemetry solar-observe -
+d /run/solar-battery-status/tariff 2750 solar-tariff solar-observe -
+d /run/solar-battery-status/forecast-plan 2750 solar-forecast-plan solar-observe -
+d /run/solar-battery-status/reconciliation 2750 solar-reconciliation solar-observe -
+d /run/solar-battery-status/dashboard 2750 solar-dashboard solar-observe -

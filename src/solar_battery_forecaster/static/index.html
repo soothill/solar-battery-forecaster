@@ -16,6 +16,7 @@
           <h1>Solar plan</h1>
         </div>
         <div class="filters">
+          <a class="status-link" href="#system-status">System status</a>
           <label>Property <select id="property"></select></label>
           <label>Date <input id="day" type="date"></label>
         </div>
@@ -44,6 +45,17 @@
         <div class="axes"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
         <p class="note" id="assumption"></p>
         <p class="note" id="factor"></p>
+      </section>
+
+      <section class="chart-card status-card" id="system-status" aria-labelledby="system-status-title">
+        <div class="chart-title">
+          <div><p class="eyebrow">LIVE HEALTH</p><h2 id="system-status-title">System status</h2></div>
+          <p id="status-updated" role="status">Loading…</p>
+        </div>
+        <div class="process-grid" id="processes"></div>
+        <h3>Recent operational messages</h3>
+        <div class="log-list" id="log-messages" aria-live="polite"></div>
+        <p class="note">Status refreshes every 30 seconds. Queued fallback data is shown as pending and is not charted until InfluxDB confirms it.</p>
       </section>
     </main>
   </body>

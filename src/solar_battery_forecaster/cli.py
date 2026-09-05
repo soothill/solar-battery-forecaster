@@ -4,8 +4,15 @@ import argparse
 import asyncio
 import logging
 import sys
+from pathlib import Path
 
-from solar_battery_forecaster.config import AppConfig, ConfigScope, load_config
+from solar_battery_forecaster.config import (
+    AppConfig,
+    ConfigScope,
+    ObservabilityConfig,
+    load_config,
+)
+from solar_battery_forecaster.observability import close_reporter, create_reporter
 from solar_battery_forecaster.operations import (
     ForecastPlanOperation,
     Operation,
@@ -21,14 +28,17 @@ WORKERS: dict[str, type[Operation]] = {
     "forecast-plan": ForecastPlanOperation,
     "reconciliation": ReconciliationOperation,
 }
+OUTBOX_ACTIONS = ["status", "verify", "drain", "export-quarantine", "retry"]
 
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Solar forecast and battery planning workers")
-    result.add_argument("command", choices=["validate", *WORKERS])
+    result.add_argument("command", choices=["validate", "outbox", *WORKERS])
+    result.add_argument("outbox_action", nargs="?", choices=OUTBOX_ACTIONS)
     result.add_argument("--config", default="config.yaml")
     result.add_argument("--log-level", default="INFO")
     result.add_argument("--scope", choices=[*WORKERS, "dashboard"])
+    result.add_argument("--output", help="new mode-0600 path for quarantine export")
     result.add_argument(
         "--once",
         action="store_true",
@@ -46,13 +56,41 @@ def worker_interval(config: AppConfig, command: str) -> float:
 
 
 async def _run(args: argparse.Namespace) -> int:
-    if args.command == "validate":
+    if args.command in {"validate", "outbox"}:
         if args.scope is None:
-            raise ValueError("validate requires --scope")
+            raise ValueError(f"{args.command} requires --scope")
         scope: ConfigScope = args.scope
     else:
         scope = args.command
     config = load_config(args.config, scope=scope)
+    if args.command == "outbox":
+        if scope == "dashboard" or config.outbox is None:
+            raise ValueError("outbox commands require a writer scope")
+        if args.outbox_action is None:
+            raise ValueError("outbox requires an action")
+        store = InfluxStore(config.influxdb, config.outbox, scope)
+        try:
+            outbox = store.outbox
+            if outbox is None:
+                raise RuntimeError("outbox is unavailable")
+            if args.outbox_action == "status":
+                print(outbox.status_json())
+            elif args.outbox_action == "verify":
+                outbox.verify()
+                if outbox.status().quarantined_records:
+                    raise RuntimeError("outbox verification quarantined corrupt records")
+                print("outbox verified")
+            elif args.outbox_action == "drain":
+                print(f"delivered {store.replay(force=True)} record(s)")
+            elif args.outbox_action == "retry":
+                print(f"reset {outbox.retry()} pending record(s)")
+            else:
+                if args.output is None:
+                    raise ValueError("export-quarantine requires --output")
+                print(f"exported {outbox.export_quarantine(Path(args.output))} record(s)")
+            return 0
+        finally:
+            await asyncio.to_thread(store.close)
     if args.command == "validate":
         store = InfluxStore(config.influxdb)
         try:
@@ -63,15 +101,32 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"configuration valid; {len(config.properties)} property/properties")
         return 0
 
-    operation = WORKERS[args.command](config)
+    reporter = create_reporter(
+        getattr(config, "observability", ObservabilityConfig()),
+        args.command,
+        [item.id for item in config.properties],
+    )
+    operation: Operation | None = None
     try:
+        operation = WORKERS[args.command](config)
+        if hasattr(operation, "reporter"):
+            operation.reporter = reporter
         if args.once:
-            return 0 if await operation.run_cycle() else 1
+            monitored = getattr(operation, "run_monitored_cycle", operation.run_cycle)
+            cycle_succeeded = await monitored()
+            store = getattr(operation, "store", None)
+            has_undelivered = getattr(store, "has_undelivered", None)
+            undelivered = (
+                await asyncio.to_thread(has_undelivered) if callable(has_undelivered) else False
+            )
+            return 0 if cycle_succeeded and not undelivered else 1
         else:
             await operation.run_forever(worker_interval(config, args.command))
         return 0
     finally:
-        await operation.close()
+        if operation is not None:
+            await operation.close()
+        close_reporter(reporter)
 
 
 def main() -> None:
