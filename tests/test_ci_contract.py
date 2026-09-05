@@ -149,7 +149,11 @@ def test_ci_bootstrap_keeps_existing_controls_until_trusted_workflow_is_live() -
     setup_uv = next(
         step for step in security["steps"] if "setup-uv" in step.get("uses", "")
     )
-    assert setup_uv["with"] == {"version": "0.12.10", "enable-cache": "false"}
+    assert setup_uv["with"] == {
+        "version": "0.12.10",
+        "checksum": "173d95a0c32d18c896c46ba6fafbf3cf9c14ab74b033f81b76c883ef492a976b",
+        "enable-cache": "false",
+    }
     assert "--no-config sync" in security_text
     assert "--no-install-project" in security_text
     assert '"$trusted_root/.venv/bin/bandit"' in security_text

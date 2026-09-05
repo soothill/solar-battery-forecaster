@@ -196,7 +196,8 @@ During this one transition, the legacy `security` job reconstructs its scanner e
 immutable, tree-pinned `784f1c8e2010233a6c5c9fe0cadd4c95b40f5983` snapshot. It verifies that
 the snapshot is an ancestor of the exact PR head and checks the SHA-256 of the only three extracted
 inputs before using exact Python and uv versions with caches disabled. That trusted environment runs
-Bandit and pip-audit against the candidate without installing the project; the separately pinned
+Bandit and pip-audit against the candidate without installing the project; the uv release archive
+is checked against its known SHA-256, and the separately pinned
 Gitleaks action scans secrets. This immutable snapshot is temporary bootstrap evidence and is
 retired with the legacy workflow. The two frozen matrix `test` jobs declare both `security` and
 `dependency-review` as prerequisites, so no candidate install, test, build backend, or build starts
