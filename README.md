@@ -70,6 +70,12 @@ installation IDs are not tags and are not written by the supplied adapters.
 
 Requires Python 3.11 or later and InfluxDB OSS 2.x.
 
+For a complete Proxmox LXC walkthrough—including InfluxDB buckets/tokens, Sigenergy and Octopus
+onboarding, per-service secrets, firewalling, authenticated mobile access, acceptance tests,
+backups, rotation and troubleshooting—start with the
+**[Setup and credentials guide](docs/setup-and-credentials.md)**. The hardened release-install
+commands remain canonical in [`deployment/LXC.md`](deployment/LXC.md).
+
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
@@ -129,6 +135,11 @@ The public Octopus tariff endpoint returns price validity intervals. The service
 interval as cheap when its inclusive-of-VAT price is at or below the configured threshold.
 This works for fixed off-peak and dynamic tariffs without hard-coding clock times.
 
+Version 0.1 accepts only positive price intervals of at most two hours. Some real Intelligent
+Octopus responses contain 6-hour or 18-hour standard-rate intervals and are therefore rejected.
+The Intelligent tariff codes in `config.example.yaml` are illustrative, not a production-tested
+default; test the property's exact codes with `tariff --once` before relying on them.
+
 Extra Intelligent Octopus dispatches outside the normal cheap window require an
 authenticated GraphQL integration. Octopus deprecated `plannedDispatches` in favour of
 `flexPlannedDispatches`; that integration is intentionally not guessed in the first
@@ -149,9 +160,11 @@ the forecast issue time remains visible so stale data is obvious. The same view 
 recommended target, grid charge, estimated cost, and learned correction factor, with a property
 selector for multi-property installations.
 
-Run `solar-battery-dashboard --config config.yaml`, then open
-`http://127.0.0.1:8080/?property=example-home`. For use away from the LXC itself, keep the
-service on loopback and publish it through an authenticated HTTPS reverse proxy.
+The supplied systemd unit runs the dashboard on `127.0.0.1:8088`; open
+`http://127.0.0.1:8088/?property=example-home` inside the LXC. The standalone
+`solar-battery-dashboard --config config.yaml` command defaults to port 8080 unless
+`--port 8088` is supplied. For use away from the LXC itself, keep the service on loopback and
+publish it through an authenticated HTTPS reverse proxy.
 
 The page also has a live status view for all five independent processes, with 30-second
 heartbeats, last cycle/accepted/confirmed-delivery times, fallback counts, and a bounded list of

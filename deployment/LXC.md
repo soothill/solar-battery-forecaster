@@ -1,7 +1,11 @@
 # Debian LXC deployment
 
-Use an unprivileged Debian 12 LXC with one vCPU, 512 MB RAM, 4 GB disk, accurate time, outbound
-HTTPS, and access only to the dedicated InfluxDB endpoint. Do not expose the collector publicly.
+Use an unprivileged Debian 12 LXC with one vCPU, at least 512 MB RAM and 4 GB disk, accurate time,
+controlled outbound HTTPS, and network access to the dedicated InfluxDB endpoint. Prefer 1 GB RAM and
+8 GB disk for operational headroom or a co-located authenticated Nginx proxy. Do not expose the
+collector publicly. For the complete operator journey and provider credential onboarding, read
+[`docs/setup-and-credentials.md`](../docs/setup-and-credentials.md); this file remains the canonical
+hardened release and service installation reference.
 
 ## Release inputs
 

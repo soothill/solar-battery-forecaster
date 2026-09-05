@@ -65,3 +65,8 @@
   events in service-owned runtime directories. Arbitrary logs remain in journald; the dashboard
   reads a fixed allowlist rather than peer SQLite or journals, and optional syslog uses a bounded
   background queue and verified TLS without affecting collection.
+- 2026-09-06: The approachable setup guide complements rather than replaces the hardened LXC
+  reference. It records every provider input's source, secrecy, destination, minimum privilege,
+  validation and rotation, labels all executable examples by host context, and uses documentation
+  contract tests to keep ports, token grants, fallback semantics and current provider limitations
+  aligned with the implementation.
