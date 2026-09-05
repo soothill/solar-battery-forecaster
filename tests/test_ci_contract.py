@@ -130,9 +130,35 @@ def test_ci_bootstrap_keeps_existing_controls_until_trusted_workflow_is_live() -
     assert legacy["jobs"]["test"]["needs"] == ["security", "dependency-review"]
     security = legacy["jobs"]["security"]
     security_text = str(security)
-    assert "uv sync" not in security_text
-    assert "bandit==1.9.4" in security_text
-    assert "pip-audit==2.10.1" in security_text
+    assert security["env"]["TRUSTED_TOOLS_SHA"] == (
+        "784f1c8e2010233a6c5c9fe0cadd4c95b40f5983"
+    )
+    assert security["env"]["UV_PYTHON_DOWNLOADS"] == "never"
+    assert "git merge-base --is-ancestor" in security_text
+    assert "e1ac0e386ef08b4f94da709e962b913558158289" in security_text
+    for digest in [
+        "d3f7a8b899184b5fc196f95e8711485050626ceb59d9baf064c61a855460733d",
+        "93c9f3466836c79c784ef1c21c82c7afccf4081f5a1e131ab8141e0e248a6f50",
+        "424930dde720a3a56567e39e8ed6a1d358a36526c8f4a4d49325bd30058f36c1",
+    ]:
+        assert digest in security_text
+    setup_python = next(
+        step for step in security["steps"] if "setup-python" in step.get("uses", "")
+    )
+    assert setup_python["with"]["python-version"] == "3.12.14"
+    setup_uv = next(
+        step for step in security["steps"] if "setup-uv" in step.get("uses", "")
+    )
+    assert setup_uv["with"] == {"version": "0.12.10", "enable-cache": "false"}
+    assert "--no-config sync" in security_text
+    assert "--no-install-project" in security_text
+    assert '"$trusted_root/.venv/bin/bandit"' in security_text
+    assert '"$trusted_root/.venv/bin/pip-audit"' in security_text
+    assert '"$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/deployment/ci-runner"' in security_text
+    assert "--no-config export" in security_text
+    assert "UV_CONFIG_FILE UV_INDEX UV_INDEX_URL" in security_text
+    assert "uvx" not in security_text
+    assert "enable-cache': 'true" not in security_text
     for job in legacy["jobs"].values():
         checkout = next(
             step
@@ -142,7 +168,7 @@ def test_ci_bootstrap_keeps_existing_controls_until_trusted_workflow_is_live() -
         assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
         assert checkout["with"]["persist-credentials"] == "false"
         assert any(
-            step.get("run") == 'test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"'
+            'test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"' in step.get("run", "")
             for step in job["steps"]
         )
     legacy_rendered = LEGACY_WORKFLOW.read_text(encoding="utf-8")
@@ -155,6 +181,7 @@ def test_ci_bootstrap_keeps_existing_controls_until_trusted_workflow_is_live() -
     assert "integration/App ID" in deployment
     assert "workflow token only `contents: read`" in deployment
     assert "That token cannot\nwrite statuses" in deployment
+    assert "immutable snapshot is temporary bootstrap evidence" in deployment
 
 
 def test_release_provenance_stays_github_hosted() -> None:

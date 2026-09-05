@@ -55,3 +55,6 @@
 - 2026-09-05: Trusted CI publishes its immutable pre-candidate evidence outputs from a completed
   step before candidate execution, and binds scheduling to the fixed `solar-public-ci` organization
   runner group by both group name and ID so configuration drift fails closed.
+- 2026-09-05: Temporary legacy security checks reconstruct their scanners from a verified ancestor
+  commit and tree with exact input hashes and tool versions; candidate code is scanned but never
+  supplies or installs the bootstrap scanner environment.
