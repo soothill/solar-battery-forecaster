@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#081712">
+    <title>Solar plan</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">HOME ENERGY</p>
+          <h1>Solar plan</h1>
+        </div>
+        <div class="filters">
+          <label>Property <select id="property"></select></label>
+          <label>Date <input id="day" type="date"></label>
+        </div>
+      </header>
+
+      <section class="summary" aria-label="Today's summary">
+        <article><span>Forecast</span><strong id="forecast-total">—</strong><small>kWh</small></article>
+        <article><span>Generated</span><strong id="actual-total">—</strong><small>kWh</small></article>
+        <article><span>Battery</span><strong id="battery-now">—</strong><small>%</small></article>
+        <article><span>Target</span><strong id="battery-target">—</strong><small>%</small></article>
+        <article><span>Grid charge</span><strong id="grid-charge">—</strong><small>kWh</small></article>
+        <article><span>Est. cost</span><strong id="charge-cost">—</strong><small>p</small></article>
+      </section>
+
+      <section class="chart-card">
+        <div class="chart-title">
+          <div><p class="eyebrow">ONE DAY</p><h2>Generation & battery</h2></div>
+          <p id="status" role="status">Loading…</p>
+        </div>
+        <div class="legend" aria-hidden="true">
+          <span class="forecast">Forecast solar</span><span class="actual">Actual solar</span>
+          <span class="planned-soc">Planned battery</span><span class="actual-soc">Actual battery</span>
+          <span class="cheap">Cheap rate</span>
+        </div>
+        <div class="canvas-wrap"><canvas id="curve" aria-label="Solar generation and battery state chart"></canvas></div>
+        <div class="axes"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+        <p class="note" id="assumption"></p>
+        <p class="note" id="factor"></p>
+      </section>
+    </main>
+  </body>
+</html>

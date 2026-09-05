@@ -1,0 +1,26 @@
+[Unit]
+Description=Solar Battery Forecaster Dashboard
+After=network-online.target influxdb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=solarplanner
+Group=solarplanner
+WorkingDirectory=/opt/solar-battery-forecaster
+EnvironmentFile=/etc/solar-battery-forecaster/environment
+ExecStart=/opt/solar-battery-forecaster/.venv/bin/solar-battery-dashboard --config /etc/solar-battery-forecaster/config.yaml --host 127.0.0.1 --port 8088
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

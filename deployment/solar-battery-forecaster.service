@@ -1,0 +1,27 @@
+[Unit]
+Description=Solar Battery Forecaster
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=solarplanner
+Group=solarplanner
+WorkingDirectory=/opt/solar-battery-forecaster
+EnvironmentFile=/etc/solar-battery-forecaster/environment
+ExecStart=/opt/solar-battery-forecaster/.venv/bin/solar-battery-forecaster run --config /etc/solar-battery-forecaster/config.yaml
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
+
