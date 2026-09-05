@@ -24,3 +24,7 @@
 - 2026-09-05: Runtime least privilege requires three explicit Influx buckets, distinct Unix
   user/private-group identities and secret files per process, and an exactly pinned build backend
   installed from the frozen development lock before no-isolation builds.
+- 2026-09-05: The three Influx bucket names must be pairwise distinct. Releases originate only from
+  exact version tags whose verified commit is reachable from protected main; frozen artifacts and
+  their checksum file receive GitHub/Sigstore provenance attestations, which deployment verifies
+  against the exact workflow, tag, and reviewed source digest before treating checksums as useful.

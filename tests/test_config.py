@@ -119,3 +119,32 @@ def test_scoped_config_rejects_legacy_single_bucket(
 
     with pytest.raises(ValueError, match="telemetry_bucket"):
         load_config(path, scope="dashboard")
+
+
+@pytest.mark.parametrize(
+    ("field", "duplicate"),
+    [
+        ("tariff_bucket", "solar_telemetry"),
+        ("planning_bucket", "solar_telemetry"),
+        ("planning_bucket", "solar_tariff"),
+    ],
+)
+def test_scoped_config_rejects_every_duplicate_bucket_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    duplicate: str,
+) -> None:
+    path = tmp_path / "config.yaml"
+    original = {
+        "tariff_bucket": "solar_tariff",
+        "planning_bucket": "solar_planning",
+    }[field]
+    path.write_text(
+        SCOPED_CONFIG.replace(f"  {field}: {original}", f"  {field}: {duplicate}"),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("INFLUX_DASHBOARD_TOKEN", "dashboard-token")
+
+    with pytest.raises(ValueError, match="pairwise distinct"):
+        load_config(path, scope="dashboard")

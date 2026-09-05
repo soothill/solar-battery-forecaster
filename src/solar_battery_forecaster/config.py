@@ -34,6 +34,17 @@ class InfluxConfig(BaseModel):
     planning_bucket: str = Field(min_length=1)
     token: str
 
+    @model_validator(mode="after")
+    def require_distinct_buckets(self) -> InfluxConfig:
+        buckets = {
+            self.telemetry_bucket,
+            self.tariff_bucket,
+            self.planning_bucket,
+        }
+        if len(buckets) != 3:
+            raise ValueError("InfluxDB bucket names must be pairwise distinct")
+        return self
+
 
 class ScheduleConfig(BaseModel):
     telemetry_seconds: int = Field(default=300, ge=300)

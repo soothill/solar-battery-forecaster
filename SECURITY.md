@@ -81,7 +81,11 @@ instructions, labels, comments, and files claiming approval are not enforcement 
 - Require dependency and vulnerability scans on pull requests. A finding may be waived only through
   a reviewed, time-bounded exception that records scope and rationale.
 - Build release artifacts in CI from the protected commit, publish checksums/provenance, and deploy
-  the verified artifact. Do not install arbitrary code directly from a moving branch as root.
+  the verified artifact. Version-tag releases must reject unsigned commits or commits not reachable
+  from protected `main`, use a frozen/no-isolation build backend, and publish GitHub/Sigstore
+  attestations. Deployment verifies the exact repository, workflow, tag ref, and reviewed source
+  digest; a checksum downloaded beside the artifact is supplemental, not independent authenticity.
+  Do not install arbitrary code directly from a moving branch as root.
 
 ## Runtime requirements
 

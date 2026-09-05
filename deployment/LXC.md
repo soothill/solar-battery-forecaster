@@ -5,27 +5,54 @@ HTTPS, and access only to the dedicated InfluxDB endpoint. Do not expose the col
 
 ## Release inputs
 
-Deploy a reviewed release, never a moving branch. Download the release wheel, source archive, and
-publisher-generated `SHA256SUMS` from the same GitHub release. Verify both artifacts before any
-installation. Replace `VERSION` below with an exact signed release tag.
+Deploy a reviewed release, never a moving branch. Perform download and provenance verification on
+a trusted administrator workstation, then transfer only the verified inputs into the LXC. Install
+a current [GitHub CLI](https://cli.github.com/) from its official distribution; Debian's base
+packages are not assumed to provide a sufficiently recent version. Confirm that
+`gh attestation verify --help` lists `--signer-workflow`, `--source-ref`, and `--source-digest`.
+
+Record the exact 40-character reviewed source commit independently of the release download, then
+download the wheel, source archive, and publisher-generated `SHA256SUMS`. Replace the two
+placeholders below before running these commands on the trusted workstation.
 
 ```bash
-mkdir /tmp/solar-release
-cd /tmp/solar-release
-curl --fail --location --remote-name \
-  https://github.com/soothill/solar-battery-forecaster/releases/download/VERSION/solar_battery_forecaster-0.1.0-py3-none-any.whl
-curl --fail --location --remote-name \
-  https://github.com/soothill/solar-battery-forecaster/releases/download/VERSION/solar_battery_forecaster-0.1.0.tar.gz
-curl --fail --location --remote-name \
-  https://github.com/soothill/solar-battery-forecaster/releases/download/VERSION/SHA256SUMS
+release_version=v0.1.0
+source_commit=REPLACE_WITH_40_CHARACTER_REVIEWED_COMMIT_SHA
+repository=soothill/solar-battery-forecaster
+gh attestation verify --help >/dev/null
+mkdir solar-release
+cd solar-release
+gh release download "$release_version" --repo "$repository" \
+  --pattern 'solar_battery_forecaster-*.whl' \
+  --pattern 'solar_battery_forecaster-*.tar.gz' \
+  --pattern SHA256SUMS
+for artifact in solar_battery_forecaster-*.whl solar_battery_forecaster-*.tar.gz SHA256SUMS; do
+  gh attestation verify "$artifact" \
+    --repo "$repository" \
+    --signer-workflow soothill/solar-battery-forecaster/.github/workflows/release.yml \
+    --source-ref "refs/tags/$release_version" \
+    --source-digest "$source_commit" \
+    --deny-self-hosted-runners
+done
 sha256sum --check SHA256SUMS
 ```
 
-The protected release workflow must publish these checksums from the reviewed commit. Signature
-verification and required GitHub checks are repository controls; a text file claiming approval is
-not a substitute. CI installs the frozen development lock, including the exact build backend
-version declared in `pyproject.toml`, and runs the build with both `--frozen` and `--no-isolation`
-so it cannot resolve an unreviewed backend at build time.
+Do not install if any attestation fails its repository, exact workflow identity, tag ref, source
+commit digest, or hosted-runner check. `SHA256SUMS` is itself attested, but because it travels in
+the same release channel as the artifacts it is only a supplemental corruption/completeness check,
+not independent proof of authenticity.
+
+After every attestation and checksum succeeds, transfer the three verified files over a trusted
+administrative channel into `/tmp/solar-release` inside the LXC. Run `sha256sum --check
+SHA256SUMS` again in that directory after transfer and before installation. The GitHub CLI is not
+required inside the LXC when verification is completed on the trusted workstation.
+
+The tag-only release workflow accepts only an exact project version whose signed commit is on
+`origin/main`. It tests, scans, builds with the frozen development lock and exact build backend,
+attests every release input through Sigstore and GitHub, then publishes through a separate
+`contents: write` job. Protect version tags and the GitHub `release` environment; signature
+verification, required checks, and environment approval are repository controls, and a text file
+claiming approval is not a substitute.
 
 ## Install without a privileged build
 
@@ -52,6 +79,7 @@ python3 -m venv /opt/solar-battery-forecaster/.venv
   /tmp/solar-release/solar_battery_forecaster-0.1.0-py3-none-any.whl
 chown -R root:solar-config /opt/solar-battery-forecaster
 chmod -R g+rX,o-rwx /opt/solar-battery-forecaster
+chmod -R g-w /opt/solar-battery-forecaster
 install -d -o root -g solar-config -m 0750 /etc/solar-battery-forecaster
 cp /opt/solar-battery-forecaster/config.example.yaml /etc/solar-battery-forecaster/config.yaml
 install -o root -g solar-telemetry -m 0640 \
@@ -74,6 +102,9 @@ chmod 0640 /etc/solar-battery-forecaster/config.yaml
 cp /opt/solar-battery-forecaster/deployment/*.service /etc/systemd/system/
 systemctl daemon-reload
 ```
+
+The shared application tree is readable and executable by `solar-config` members but explicitly
+not group-writable. Only root may replace installed code or the virtual environment.
 
 Edit the shared non-secret configuration and five service-private environment files. Each process
 resolves only its own token and provider secrets. Validate one scope as that service identity,
