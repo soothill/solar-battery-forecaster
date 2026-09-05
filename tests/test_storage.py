@@ -1,7 +1,18 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 from solar_battery_forecaster.models import BatteryDecision
 from solar_battery_forecaster.storage import InfluxStore
+
+
+class ForecastRecord:
+    def __init__(self, snapshot: str, issued_at: datetime, energy: float) -> None:
+        self.values = {
+            "snapshot": snapshot,
+            "issued_at_epoch": issued_at.timestamp(),
+            "raw_energy_kwh": energy,
+            "correction_factor": 0.9,
+        }
 
 
 def test_decision_persists_input_provenance() -> None:
@@ -19,6 +30,7 @@ def test_decision_persists_input_provenance() -> None:
         expected_load_kwh=8,
         reserve_kwh=1,
         correction_factor=0.9,
+        forecast_day=created.date() + timedelta(days=1),
         forecast_snapshot_id="2026-09-05T20:28:00.000000Z",
         forecast_issued_at=issued,
         soc_observed_at=observed,
@@ -28,14 +40,49 @@ def test_decision_persists_input_provenance() -> None:
         reason="recommendation_only: test",
     )
     captured: list[object] = []
+    buckets: list[str] = []
     store = object.__new__(InfluxStore)
-    store._write = captured.extend
+
+    def capture(bucket: str, points: list[object]) -> None:
+        buckets.append(bucket)
+        captured.extend(points)
+
+    store.config = SimpleNamespace(planning_bucket="planning")
+    store._write = capture
 
     store.write_decision("home", decision)
 
     line = captured[0].to_line_protocol()
+    assert buckets == ["planning"]
     assert 'forecast_snapshot_id="2026-09-05T20:28:00.000000Z"' in line
     assert f'forecast_issued_at="{issued.isoformat()}"' in line
     assert f'soc_observed_at="{observed.isoformat()}"' in line
     assert "tariff_coverage_hours=12i" in line
     assert f'tariff_coverage_stop="{(created + timedelta(hours=12)).isoformat()}"' in line
+
+
+def test_complete_forecast_selects_newest_complete_snapshot() -> None:
+    old_issued = datetime(2026, 9, 5, 20, tzinfo=UTC)
+    new_issued = old_issued + timedelta(hours=1)
+    records = [
+        ForecastRecord("new", new_issued, 3),
+        ForecastRecord("old", old_issued, 1),
+        ForecastRecord("new", new_issued, 4),
+        ForecastRecord("old", old_issued, 2),
+    ]
+    store = object.__new__(InfluxStore)
+    store.config = SimpleNamespace(planning_bucket="test")
+    store._records = lambda query: records
+
+    snapshot = store.complete_forecast_snapshot(
+        "home",
+        "provider",
+        datetime(2026, 9, 6, tzinfo=UTC),
+        datetime(2026, 9, 7, tzinfo=UTC),
+        expected_points=2,
+    )
+
+    assert snapshot is not None
+    assert snapshot.snapshot_id == "new"
+    assert snapshot.issued_at == new_issued
+    assert snapshot.raw_energy_kwh == 7

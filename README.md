@@ -31,10 +31,15 @@ credentials; credentials are never stored in this repository.
 
 ## How it works
 
-At five-minute intervals the service reads PV power, battery state of charge, load, grid
+At five-minute intervals the telemetry worker reads PV power, battery state of charge, load, grid
 flow, and cumulative generation. Before the overnight period it preserves the next day's
 forecast, calculates a robust correction factor from completed days, and writes a battery
 target recommendation. At the end of a day it records actual versus forecast generation.
+
+Telemetry, tariff, forecast planning, reconciliation, and the dashboard run as independent
+processes. A failure in one does not restart the others. Provider sessions are reused and all
+outbound requests are serialized, paced, and retried within configured bounds. Forecast planning
+uses only fresh Octopus intervals already stored by the tariff worker.
 
 All timestamps are written in UTC. Property time zones are used only to define local days
 and schedules, which keeps half-hourly data correct over daylight-saving changes.
@@ -61,31 +66,36 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -e .
 cp config.example.yaml config.yaml
-cp .env.example .env
 ```
 
-Load the environment variables using your preferred secret manager, edit `config.yaml`,
-then validate the database connection:
+Edit `config.yaml`, copy the relevant example from `deployment/environment/`, and load only the
+environment for the command being run. For example, validate the telemetry scope:
 
 ```bash
+cp deployment/environment/telemetry.env.example telemetry.env
+# Edit telemetry.env, then load only this worker's environment.
 set -a
-. ./.env
+. ./telemetry.env
 set +a
-solar-battery-forecaster validate --config config.yaml
-solar-battery-forecaster collect-once --config config.yaml
+solar-battery-forecaster validate --scope telemetry --config config.yaml
+solar-battery-forecaster telemetry --config config.yaml --once
+solar-battery-forecaster tariff --config config.yaml --once
+solar-battery-forecaster forecast-plan --config config.yaml --once
+solar-battery-forecaster reconciliation --config config.yaml --once
 ```
 
-Run continuously:
+For continuous operation, run each command without `--once` in its own process. The supplied
+systemd units do this and intentionally have no failure coupling.
 
-```bash
-solar-battery-forecaster run --config config.yaml
-```
+The process boundary and pacing decisions are recorded in
+[`docs/adr/0001-isolated-workers-and-provider-pacing.md`](docs/adr/0001-isolated-workers-and-provider-pacing.md).
 
 ## Configuration
 
 Copy `config.example.yaml`; do not edit the example in place. Secret values use exact
-environment-variable placeholders such as `${INFLUX_TOKEN}`. Startup fails if a required
-variable is absent.
+environment-variable placeholders such as `${INFLUX_TELEMETRY_TOKEN}`. Startup fails if a
+variable required by the selected command is absent; unrelated provider secrets are neither
+required nor expanded.
 
 Each roof plane has its own panel count, panel wattage, tilt, compass azimuth, and initial
 performance ratio. Compass azimuth uses the familiar convention: north 0°, east 90°,
@@ -96,9 +106,10 @@ array layout and location before using its results.
 
 ## InfluxDB permissions
 
-Create a dedicated bucket, normally `solar_planner`, and a token with read/write access to
-that bucket only. Do not use an all-access operator token. The service reads its own daily
-results to learn the correction factor.
+Use separate telemetry, tariff, and planning buckets because InfluxDB OSS permissions are
+bucket-level. Give each worker its own token with only the bucket reads/writes listed in
+[`deployment/LXC.md`](deployment/LXC.md); never use an all-access operator token. Command-scoped
+configuration prevents a worker from resolving unrelated provider credentials or tokens.
 
 ## Octopus prices and charging intervals
 
@@ -113,8 +124,9 @@ release and will be added against a real account fixture.
 
 ## LXC deployment
 
-See [`deployment/LXC.md`](deployment/LXC.md). A native systemd service is used rather than
-running Docker inside LXC.
+See [`deployment/LXC.md`](deployment/LXC.md). Native, hardened systemd services are used rather
+than running Docker inside LXC. The release wheel and source archive are checksum-verified, and
+the privileged installation path never resolves or runs an unpinned build backend.
 
 ## Mobile dashboard
 

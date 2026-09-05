@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 
 def forecast_snapshot_id(issued_at: datetime) -> str:
@@ -24,6 +24,12 @@ class TariffInterval:
     end: datetime
     price_pence_per_kwh: float
     is_cheap: bool
+
+
+@dataclass(frozen=True)
+class StoredTariffs:
+    intervals: list[TariffInterval]
+    retrieved_at: datetime
 
 
 @dataclass(frozen=True)
@@ -51,6 +57,7 @@ class BatteryDecision:
     expected_load_kwh: float
     reserve_kwh: float
     correction_factor: float
+    forecast_day: date
     forecast_snapshot_id: str
     forecast_issued_at: datetime
     soc_observed_at: datetime

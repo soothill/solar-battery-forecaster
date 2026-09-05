@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import statistics
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from solar_battery_forecaster.config import BatteryConfig
 from solar_battery_forecaster.models import BatteryDecision
@@ -23,6 +23,7 @@ def make_decision(
     factor: float,
     conservative_multiplier: float,
     expected_load_kwh: float,
+    forecast_day: date,
     forecast_snapshot_id: str,
     forecast_issued_at: datetime,
     soc_observed_at: datetime,
@@ -74,6 +75,7 @@ def make_decision(
         expected_load_kwh=expected_load_kwh,
         reserve_kwh=battery.reserve_kwh,
         correction_factor=factor,
+        forecast_day=forecast_day,
         forecast_snapshot_id=forecast_snapshot_id,
         forecast_issued_at=forecast_issued_at,
         soc_observed_at=soc_observed_at,

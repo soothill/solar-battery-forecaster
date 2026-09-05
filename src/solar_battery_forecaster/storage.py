@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -11,6 +11,7 @@ from solar_battery_forecaster.models import (
     BatteryDecision,
     ForecastInterval,
     ForecastSnapshot,
+    StoredTariffs,
     TariffInterval,
     Telemetry,
     forecast_snapshot_id,
@@ -29,10 +30,10 @@ class InfluxStore:
     def ping(self) -> bool:
         return bool(self.client.ping())
 
-    def _write(self, points: Iterable[Point]) -> None:
+    def _write(self, bucket: str, points: Iterable[Point]) -> None:
         records = list(points)
         if records:
-            self.writer.write(bucket=self.config.bucket, org=self.config.org, record=records)
+            self.writer.write(bucket=bucket, org=self.config.org, record=records)
 
     def write_forecast(
         self,
@@ -68,7 +69,7 @@ class InfluxStore:
                 .field("issued_at_epoch", int(interval.issued_at.timestamp()))
                 .time(interval.start, WritePrecision.S)
             )
-        self._write(points)
+        self._write(self.config.planning_bucket, points)
 
     def write_telemetry(self, property_id: str, source: str, item: Telemetry) -> None:
         point = Point("energy_telemetry").tag("property", property_id).tag("source", source)
@@ -85,11 +86,15 @@ class InfluxStore:
             if value is not None:
                 point = point.field(name, value)
         point = point.field("inverter_online", item.inverter_online)
-        self._write([point.time(item.observed_at, WritePrecision.S)])
+        self._write(
+            self.config.telemetry_bucket,
+            [point.time(item.observed_at, WritePrecision.S)],
+        )
 
     def write_tariffs(
         self, property_id: str, provider: str, intervals: list[TariffInterval]
     ) -> None:
+        retrieved_at_epoch = int(datetime.now(UTC).timestamp())
         points = [
             Point("electricity_tariff")
             .tag("property", property_id)
@@ -97,10 +102,11 @@ class InfluxStore:
             .field("price_pence_per_kwh", item.price_pence_per_kwh)
             .field("is_cheap", item.is_cheap)
             .field("interval_minutes", int((item.end - item.start).total_seconds() / 60))
+            .field("retrieved_at_epoch", retrieved_at_epoch)
             .time(item.start, WritePrecision.S)
             for item in intervals
         ]
-        self._write(points)
+        self._write(self.config.tariff_bucket, points)
 
     def write_decision(self, property_id: str, item: BatteryDecision) -> None:
         point = (
@@ -115,6 +121,7 @@ class InfluxStore:
             .field("expected_load_kwh", item.expected_load_kwh)
             .field("reserve_kwh", item.reserve_kwh)
             .field("correction_factor", item.correction_factor)
+            .field("forecast_day", item.forecast_day.isoformat())
             .field("forecast_snapshot_id", item.forecast_snapshot_id)
             .field("forecast_issued_at", item.forecast_issued_at.astimezone(UTC).isoformat())
             .field("soc_observed_at", item.soc_observed_at.astimezone(UTC).isoformat())
@@ -141,7 +148,64 @@ class InfluxStore:
             point = point.field(
                 "estimated_charge_cost_pence", item.estimated_charge_cost_pence
             )
-        self._write([point])
+        self._write(self.config.planning_bucket, [point])
+
+    def tariff_intervals(
+        self, property_id: str, start: datetime, stop: datetime
+    ) -> StoredTariffs | None:
+        query_start = start.astimezone(UTC) - timedelta(hours=2)
+        start_text = query_start.isoformat()
+        stop_text = stop.astimezone(UTC).isoformat()
+        query = f'''
+from(bucket: "{self.config.tariff_bucket}")
+  |> range(start: time(v: "{start_text}"), stop: time(v: "{stop_text}"))
+  |> filter(fn: (r) => r._measurement == "electricity_tariff")
+  |> filter(fn: (r) => r.property == "{property_id}")
+  |> filter(fn: (r) => r._field == "price_pence_per_kwh" or r._field == "is_cheap" or
+      r._field == "interval_minutes" or r._field == "retrieved_at_epoch")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> sort(columns: ["_time"])
+'''
+        records = self._records(query)
+        if not records:
+            return None
+        intervals = [
+            TariffInterval(
+                start=record.get_time(),
+                end=record.get_time()
+                + timedelta(minutes=float(record.values["interval_minutes"])),
+                price_pence_per_kwh=float(record.values["price_pence_per_kwh"]),
+                is_cheap=bool(record.values["is_cheap"]),
+            )
+            for record in records
+        ]
+        retrieved_at = datetime.fromtimestamp(
+            min(float(record.values["retrieved_at_epoch"]) for record in records), UTC
+        )
+        return StoredTariffs(intervals=intervals, retrieved_at=retrieved_at)
+
+    def decision_exists(self, property_id: str, forecast_day: date) -> bool:
+        query = f'''
+from(bucket: "{self.config.planning_bucket}")
+  |> range(start: -7d)
+  |> filter(fn: (r) => r._measurement == "battery_decision")
+  |> filter(fn: (r) => r.property == "{property_id}")
+  |> filter(fn: (r) => r._field == "forecast_day" and r._value == "{forecast_day.isoformat()}")
+  |> limit(n: 1)
+'''
+        return bool(self._records(query))
+
+    def daily_result_exists(self, property_id: str, day: date) -> bool:
+        start = datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+        stop = start + timedelta(days=1)
+        query = f'''
+from(bucket: "{self.config.planning_bucket}")
+  |> range(start: time(v: "{start.isoformat()}"), stop: time(v: "{stop.isoformat()}"))
+  |> filter(fn: (r) => r._measurement == "pv_daily")
+  |> filter(fn: (r) => r.property == "{property_id}")
+  |> limit(n: 1)
+'''
+        return bool(self._records(query))
 
     def write_daily_result(
         self,
@@ -164,7 +228,7 @@ class InfluxStore:
             .field("correction_factor_after_update", factor_after_update)
             .time(timestamp, WritePrecision.S)
         )
-        self._write([point])
+        self._write(self.config.planning_bucket, [point])
 
     def latest_soc(self, property_id: str) -> float | None:
         reading = self.latest_soc_reading(property_id)
@@ -172,7 +236,7 @@ class InfluxStore:
 
     def latest_soc_reading(self, property_id: str) -> tuple[float, datetime] | None:
         query = f'''
-from(bucket: "{self.config.bucket}")
+from(bucket: "{self.config.telemetry_bucket}")
   |> range(start: -24h)
   |> filter(fn: (r) => r._measurement == "energy_telemetry")
   |> filter(fn: (r) => r.property == "{property_id}")
@@ -196,7 +260,7 @@ from(bucket: "{self.config.bucket}")
         start_text = start.astimezone(UTC).isoformat()
         stop_text = stop.astimezone(UTC).isoformat()
         query = f'''
-from(bucket: "{self.config.bucket}")
+from(bucket: "{self.config.planning_bucket}")
   |> range(start: time(v: "{start_text}"), stop: time(v: "{stop_text}"))
   |> filter(fn: (r) => r._measurement == "pv_forecast")
   |> filter(fn: (r) => r.property == "{property_id}" and r.provider == "{provider}")
@@ -227,7 +291,7 @@ from(bucket: "{self.config.bucket}")
                     correction_factor=float(records[0].values["correction_factor"]),
                 )
             )
-        return min(complete, key=lambda item: item.issued_at) if complete else None
+        return max(complete, key=lambda item: item.issued_at) if complete else None
 
     def forecast_point_count(
         self,
@@ -239,7 +303,7 @@ from(bucket: "{self.config.bucket}")
         start_text = start.astimezone(UTC).isoformat()
         stop_text = stop.astimezone(UTC).isoformat()
         query = f'''
-from(bucket: "{self.config.bucket}")
+from(bucket: "{self.config.planning_bucket}")
   |> range(start: time(v: "{start_text}"), stop: time(v: "{stop_text}"))
   |> filter(fn: (r) => r._measurement == "pv_forecast")
   |> filter(fn: (r) => r.property == "{property_id}" and r.provider == "{provider}")
@@ -255,7 +319,7 @@ from(bucket: "{self.config.bucket}")
         start_text = start.astimezone(UTC).isoformat()
         stop_text = stop.astimezone(UTC).isoformat()
         query = f'''
-from(bucket: "{self.config.bucket}")
+from(bucket: "{self.config.planning_bucket}")
   |> range(start: time(v: "{start_text}"), stop: time(v: "{stop_text}"))
   |> filter(fn: (r) => r._measurement == "pv_forecast")
   |> filter(fn: (r) => r.property == "{property_id}" and r.provider == "{provider}")
@@ -267,7 +331,7 @@ from(bucket: "{self.config.bucket}")
 
     def recent_daily_ratios(self, property_id: str, days: int = 60) -> list[float]:
         query = f'''
-from(bucket: "{self.config.bucket}")
+from(bucket: "{self.config.planning_bucket}")
   |> range(start: -{days}d)
   |> filter(fn: (r) => r._measurement == "pv_daily")
   |> filter(fn: (r) => r.property == "{property_id}")
@@ -286,7 +350,7 @@ from(bucket: "{self.config.bucket}")
         start_text = start.astimezone(UTC).isoformat()
         stop_text = stop.astimezone(UTC).isoformat()
         actual_query = f'''
-from(bucket: "{self.config.bucket}")
+from(bucket: "{self.config.telemetry_bucket}")
   |> range(start: time(v: "{start_text}"), stop: time(v: "{stop_text}"))
   |> filter(fn: (r) => r._measurement == "energy_telemetry")
   |> filter(fn: (r) => r.property == "{property_id}")
@@ -294,7 +358,7 @@ from(bucket: "{self.config.bucket}")
   |> last()
 '''
         count_query = f'''
-from(bucket: "{self.config.bucket}")
+from(bucket: "{self.config.telemetry_bucket}")
   |> range(start: time(v: "{start_text}"), stop: time(v: "{stop_text}"))
   |> filter(fn: (r) => r._measurement == "energy_telemetry")
   |> filter(fn: (r) => r.property == "{property_id}")

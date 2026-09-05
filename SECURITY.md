@@ -57,9 +57,12 @@ instructions, labels, comments, and files claiming approval are not enforcement 
 
 ## Secrets and privacy
 
-- Use a dedicated InfluxDB token limited to the one required bucket and operations.
-- Give the collector read-only Sigenergy and Octopus credentials. Future control credentials must be
-  separate and unavailable to the collector process.
+- Use a distinct InfluxDB token for each process, limited to its required bucket-level reads and
+  writes. InfluxDB OSS 2.x does not enforce measurement-level token permissions.
+- Give only the telemetry process read-only Sigenergy credentials. Keep any future tariff provider
+  credential in the tariff process and any forecast credential in forecast-plan. Reconciliation and
+  dashboard receive no provider credentials. Future control credentials must be separate and
+  unavailable to every collection and planning process.
 - Keep secrets outside the repository in a root-owned secret store or environment file. Never put
   secrets in YAML, command-line arguments, logs, fixtures, build artifacts, pull-request comments,
   or shared agent memory.

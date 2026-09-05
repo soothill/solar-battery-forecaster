@@ -9,6 +9,7 @@ FORECAST_ISSUED = datetime(2026, 9, 5, 20, 30, tzinfo=UTC)
 SOC_OBSERVED = datetime(2026, 9, 5, 20, 25, tzinfo=UTC)
 TARIFF_START = datetime(2026, 9, 5, 20, 30, tzinfo=UTC)
 PROVENANCE = {
+    "forecast_day": FORECAST_ISSUED.date() + timedelta(days=1),
     "forecast_snapshot_id": "2026-09-05T20:30:00.000000Z",
     "forecast_issued_at": FORECAST_ISSUED,
     "soc_observed_at": SOC_OBSERVED,

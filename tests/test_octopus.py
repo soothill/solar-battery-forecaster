@@ -42,7 +42,7 @@ async def test_fetch_marks_threshold_as_cheap_and_sorts_results() -> None:
     assert "/products/AGILE-TEST/electricity-tariffs/E-1R-TEST-A/" in str(
         observed_request.url
     )
-    assert observed_request.url.params["period_from"] == "2026-09-05T12:00:00Z"
+    assert observed_request.url.params["period_from"] == "2026-09-05T10:00:00Z"
     assert observed_request.url.params["period_to"] == "2026-09-07T12:00:00Z"
     assert [item.price_pence_per_kwh for item in result] == [10, 15]
     assert [item.is_cheap for item in result] == [True, False]

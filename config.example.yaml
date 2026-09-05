@@ -2,8 +2,24 @@ influxdb:
   # Use HTTPS whenever traffic leaves an isolated, trusted LAN.
   url: https://influxdb.example.invalid:8086
   org: example-org
-  bucket: solar_planner
-  token: ${INFLUX_TOKEN}
+  telemetry_bucket: solar_telemetry
+  tariff_bucket: solar_tariff
+  planning_bucket: solar_planning
+  tokens:
+    telemetry: ${INFLUX_TELEMETRY_TOKEN}
+    tariff: ${INFLUX_TARIFF_TOKEN}
+    forecast-plan: ${INFLUX_FORECAST_PLAN_TOKEN}
+    reconciliation: ${INFLUX_RECONCILIATION_TOKEN}
+    dashboard: ${INFLUX_DASHBOARD_TOKEN}
+
+http:
+  minimum_spacing_seconds: 0.5
+  max_attempts: 3
+  retry_base_seconds: 1
+  retry_max_seconds: 30
+  # Longer provider Retry-After values defer future cycles instead of being shortened.
+  retry_after_max_seconds: 300
+  jitter_seconds: 0.5
 
 schedule:
   telemetry_seconds: 300
@@ -13,6 +29,9 @@ schedule:
   forecast_minute: 30
   reconciliation_hour: 0
   reconciliation_minute: 15
+  worker_scan_seconds: 60
+  property_phase_seconds: 2
+  reconciliation_catch_up_days: 7
 
 properties:
   - id: example-home
@@ -58,3 +77,4 @@ properties:
       product_code: INTELLI-VAR-24-10-29
       tariff_code: E-1R-INTELLI-VAR-24-10-29-B
       cheap_rate_threshold_pence: 10.0
+      stale_after_minutes: 480

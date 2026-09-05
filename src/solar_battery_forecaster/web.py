@@ -67,8 +67,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self.repository.curve(properties[property_id], day)
-        except Exception:
-            LOGGER.exception("dashboard query failed")
+        except Exception as exc:
+            LOGGER.error("dashboard query failed (%s)", type(exc).__name__)
             self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "data_unavailable"})
             return
         self._json(HTTPStatus.OK, payload)
@@ -98,7 +98,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._serve_static(request.path)
 
     def log_message(self, format: str, *args: object) -> None:
-        LOGGER.info("%s - %s", self.address_string(), format % args)
+        LOGGER.debug("dashboard request completed")
 
 
 def make_server(
@@ -122,7 +122,11 @@ def main() -> None:
     parser.add_argument("--port", default=8080, type=int)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
-    config = load_config(args.config)
+    logging.getLogger("httpx").disabled = True
+    logging.getLogger("httpcore").disabled = True
+    logging.getLogger("urllib3").disabled = True
+    logging.getLogger("influxdb_client").disabled = True
+    config = load_config(args.config, scope="dashboard")
     server = make_server(config, args.host, args.port)
     try:
         LOGGER.info("dashboard listening on http://%s:%d", args.host, args.port)

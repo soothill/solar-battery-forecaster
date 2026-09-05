@@ -1,5 +1,5 @@
 [Unit]
-Description=Solar Battery Forecaster Dashboard
+Description=Solar Battery Tariff Worker
 After=network-online.target
 Wants=network-online.target
 
@@ -8,8 +8,8 @@ Type=simple
 User=solarplanner
 Group=solarplanner
 WorkingDirectory=/opt/solar-battery-forecaster
-EnvironmentFile=/etc/solar-battery-forecaster/dashboard.env
-ExecStart=/opt/solar-battery-forecaster/.venv/bin/solar-battery-dashboard --config /etc/solar-battery-forecaster/config.yaml --host 127.0.0.1 --port 8088
+EnvironmentFile=/etc/solar-battery-forecaster/tariff.env
+ExecStart=/opt/solar-battery-forecaster/.venv/bin/solar-battery-forecaster tariff --config /etc/solar-battery-forecaster/config.yaml
 Restart=on-failure
 RestartSec=15
 UMask=0027

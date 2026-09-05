@@ -84,6 +84,13 @@ class InfluxDashboardRepository:
     def close(self) -> None:
         self.client.close()
 
+    def _bucket_for(self, measurement: str) -> str:
+        if measurement == "energy_telemetry":
+            return self.influx.telemetry_bucket
+        if measurement == "electricity_tariff":
+            return self.influx.tariff_bucket
+        return self.influx.planning_bucket
+
     def _points(
         self,
         measurement: str,
@@ -102,7 +109,7 @@ class InfluxDashboardRepository:
             aggregation = (
                 f"  |> aggregateWindow(every: {aggregate}, fn: mean, createEmpty: false)\n"
             )
-        query = f'''from(bucket: "{self.influx.bucket}")
+        query = f'''from(bucket: "{self._bucket_for(measurement)}")
   |> range(start: time(v: "{start_text}"), stop: time(v: "{stop_text}"))
   |> filter(fn: (r) => r._measurement == "{measurement}")
   |> filter(fn: (r) => r.property == "{property_id}")
@@ -144,7 +151,7 @@ class InfluxDashboardRepository:
             raise ValueError("invalid property ID")
         start_text = start.astimezone(UTC).isoformat()
         stop_text = stop.astimezone(UTC).isoformat()
-        query = f'''from(bucket: "{self.influx.bucket}")
+        query = f'''from(bucket: "{self.influx.planning_bucket}")
   |> range(start: time(v: "{start_text}"), stop: time(v: "{stop_text}"))
   |> filter(fn: (r) => r._measurement == "pv_forecast")
   |> filter(fn: (r) => r.property == "{property_id}" and r.role == "overnight")
@@ -178,7 +185,7 @@ class InfluxDashboardRepository:
             raise ValueError("invalid property ID")
         start_text = start.astimezone(UTC).isoformat()
         stop_text = stop.astimezone(UTC).isoformat()
-        query = f'''from(bucket: "{self.influx.bucket}")
+        query = f'''from(bucket: "{self.influx.tariff_bucket}")
   |> range(start: time(v: "{start_text}"), stop: time(v: "{stop_text}"))
   |> filter(fn: (r) => r._measurement == "electricity_tariff")
   |> filter(fn: (r) => r.property == "{property_id}")

@@ -9,3 +9,12 @@
   adding a provider should not change the collector's planning flow.
 - 2026-09-05: Every battery recommendation persists the forecast snapshot ID and issue time,
   SoC observation time, and exact tariff coverage window so decisions remain auditable.
+- 2026-09-05: Long-running telemetry, tariff, forecast-plan, reconciliation, and dashboard
+  processes are failure-isolated. Provider workers reuse one HTTP session and serialize outbound
+  requests; InfluxDB is the durable handoff and idempotency boundary.
+- 2026-09-05: When multiple complete forecasts exist for a local day, planning deterministically
+  uses the newest issued snapshot. Provider `Retry-After` uses a separate inline-wait limit from
+  ordinary backoff; longer values defer outbound calls for the full provider-requested delay.
+- 2026-09-05: Forecast planning becomes due only after today's local scheduled time and targets
+  tomorrow; it never creates a late same-day plan. Command-scoped config strips unrelated provider
+  secrets before expansion and selects a process-specific token for bucket-level least privilege.

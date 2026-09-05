@@ -2,20 +2,44 @@ from __future__ import annotations
 
 import os
 import re
+from copy import deepcopy
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeAlias
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 ENV_PATTERN = re.compile(r"^\$\{([A-Z][A-Z0-9_]*)\}$")
+ConfigScope: TypeAlias = Literal[
+    "telemetry", "tariff", "forecast-plan", "reconciliation", "dashboard"
+]
+SENSITIVE_PROVIDER_KEYS = {
+    "api_key",
+    "app_key",
+    "app_secret",
+    "client_secret",
+    "password",
+    "system_id",
+    "token",
+}
 
 
 class InfluxConfig(BaseModel):
     url: str
     org: str
-    bucket: str = "solar_planner"
+    bucket: str | None = None
+    telemetry_bucket: str = "solar_telemetry"
+    tariff_bucket: str = "solar_tariff"
+    planning_bucket: str = "solar_planning"
     token: str
+
+    @model_validator(mode="after")
+    def support_legacy_single_bucket(self) -> InfluxConfig:
+        if self.bucket:
+            self.telemetry_bucket = self.bucket
+            self.tariff_bucket = self.bucket
+            self.planning_bucket = self.bucket
+        return self
 
 
 class ScheduleConfig(BaseModel):
@@ -26,6 +50,18 @@ class ScheduleConfig(BaseModel):
     forecast_minute: int = Field(default=30, ge=0, le=59)
     reconciliation_hour: int = Field(default=0, ge=0, le=23)
     reconciliation_minute: int = Field(default=15, ge=0, le=59)
+    worker_scan_seconds: int = Field(default=60, ge=10)
+    property_phase_seconds: float = Field(default=2, ge=0, le=60)
+    reconciliation_catch_up_days: int = Field(default=7, ge=1, le=30)
+
+
+class HttpConfig(BaseModel):
+    minimum_spacing_seconds: float = Field(default=0.5, ge=0, le=60)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+    retry_base_seconds: float = Field(default=1, ge=0.1, le=60)
+    retry_max_seconds: float = Field(default=30, ge=1, le=300)
+    retry_after_max_seconds: float = Field(default=300, ge=1, le=3600)
+    jitter_seconds: float = Field(default=0.5, ge=0, le=10)
 
 
 class ArrayConfig(BaseModel):
@@ -45,9 +81,9 @@ class InverterConfig(BaseModel):
     adapter: str = Field(default="sigenergy_cloud", min_length=1)
     rated_power_kw: float = Field(gt=0)
     region: Literal["eu", "ap", "mea", "cn", "anz", "la", "na", "jp"] = "eu"
-    app_key: str
-    app_secret: str
-    system_id: str
+    app_key: str | None = None
+    app_secret: str | None = None
+    system_id: str | None = None
 
 
 class BatteryConfig(BaseModel):
@@ -80,6 +116,7 @@ class TariffConfig(BaseModel):
     product_code: str
     tariff_code: str
     cheap_rate_threshold_pence: float = Field(default=10, ge=-100)
+    stale_after_minutes: int = Field(default=480, ge=30, le=2880)
 
 
 class PropertyConfig(BaseModel):
@@ -97,6 +134,7 @@ class PropertyConfig(BaseModel):
 
 class AppConfig(BaseModel):
     influxdb: InfluxConfig
+    http: HttpConfig = Field(default_factory=HttpConfig)
     schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     properties: list[PropertyConfig] = Field(min_length=1)
 
@@ -122,9 +160,58 @@ def _expand_env(value: object) -> object:
     return value
 
 
-def load_config(path: str | Path) -> AppConfig:
+def _strip_sensitive_provider_values(
+    value: object, allowed_keys: frozenset[str] = frozenset()
+) -> object:
+    if isinstance(value, dict):
+        return {
+            key: _strip_sensitive_provider_values(item, allowed_keys)
+            for key, item in value.items()
+            if key not in SENSITIVE_PROVIDER_KEYS or key in allowed_keys
+        }
+    if isinstance(value, list):
+        return [_strip_sensitive_provider_values(item, allowed_keys) for item in value]
+    return value
+
+
+def _prepare_scope(raw: dict[str, object], scope: ConfigScope) -> dict[str, object]:
+    prepared = deepcopy(raw)
+    influx = prepared.get("influxdb")
+    if not isinstance(influx, dict):
+        raise ValueError("influxdb configuration must be a mapping")
+    tokens = influx.pop("tokens", None)
+    if not isinstance(tokens, dict) or scope not in tokens:
+        raise ValueError(f"influxdb token is not configured for {scope}")
+    influx["token"] = tokens[scope]
+
+    owners = {
+        "inverter": "telemetry",
+        "tariff": "tariff",
+        "forecast": "forecast-plan",
+    }
+    supported_secrets = {
+        "inverter": frozenset({"app_key", "app_secret", "system_id"}),
+        "tariff": frozenset(),
+        "forecast": frozenset(),
+    }
+    properties = prepared.get("properties")
+    if not isinstance(properties, list):
+        raise ValueError("properties configuration must be a list")
+    for prop in properties:
+        if not isinstance(prop, dict):
+            continue
+        for section, owner in owners.items():
+            if section in prop:
+                allowed = supported_secrets[section] if scope == owner else frozenset()
+                prop[section] = _strip_sensitive_provider_values(prop[section], allowed)
+    return prepared
+
+
+def load_config(path: str | Path, scope: ConfigScope | None = None) -> AppConfig:
     with Path(path).open(encoding="utf-8") as handle:
         raw = yaml.safe_load(handle)
     if not isinstance(raw, dict):
         raise ValueError("configuration root must be a mapping")
+    if scope is not None:
+        raw = _prepare_scope(raw, scope)
     return AppConfig.model_validate(_expand_env(raw))

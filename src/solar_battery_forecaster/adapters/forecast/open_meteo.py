@@ -8,6 +8,7 @@ import httpx
 
 from solar_battery_forecaster.config import PropertyConfig
 from solar_battery_forecaster.models import ForecastInterval
+from solar_battery_forecaster.outbound import RequestPacer, default_pacer
 
 API_URL = "https://api.open-meteo.com/v1/forecast"
 MAX_HOURLY_POINTS = 72
@@ -23,9 +24,14 @@ def compass_to_open_meteo_azimuth(compass_degrees: float) -> float:
 class OpenMeteoForecast:
     name = "open_meteo"
 
-    def __init__(self, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient | None = None,
+        pacer: RequestPacer | None = None,
+    ) -> None:
         self._client = client or httpx.AsyncClient(timeout=30)
         self._owns_client = client is None
+        self._pacer = pacer or default_pacer()
 
     async def close(self) -> None:
         if self._owns_client:
@@ -36,8 +42,11 @@ class OpenMeteoForecast:
         energy_by_end: dict[datetime, float] = defaultdict(float)
 
         for array in prop.arrays:
-            response = await self._client.get(
+            response = await self._pacer.request(
+                self._client,
+                "GET",
                 API_URL,
+                service="forecast provider",
                 params={
                     "latitude": prop.latitude,
                     "longitude": prop.longitude,
@@ -48,7 +57,6 @@ class OpenMeteoForecast:
                     "forecast_days": 3,
                 },
             )
-            response.raise_for_status()
             payload = response.json()
             hourly = payload.get("hourly", {})
             times = hourly.get("time", [])

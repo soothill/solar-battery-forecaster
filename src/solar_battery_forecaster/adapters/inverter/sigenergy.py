@@ -11,6 +11,7 @@ import httpx
 
 from solar_battery_forecaster.config import InverterConfig
 from solar_battery_forecaster.models import Telemetry
+from solar_battery_forecaster.outbound import RequestPacer, default_pacer
 
 REGION_URLS = {
     "eu": "https://openapi-eu.sigencloud.com",
@@ -37,13 +38,21 @@ class SigenergyCloud:
 
     name = "sigenergy_cloud"
 
-    def __init__(self, config: InverterConfig, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        config: InverterConfig,
+        client: httpx.AsyncClient | None = None,
+        pacer: RequestPacer | None = None,
+    ) -> None:
+        if not config.app_key or not config.app_secret or not config.system_id:
+            raise ValueError("Sigenergy credentials are required by the telemetry worker")
         self.config = config
         self.base_url = REGION_URLS[config.region]
         self._client = client or httpx.AsyncClient(timeout=30)
         self._owns_client = client is None
         self._token: str | None = None
         self._token_expiry = 0.0
+        self._pacer = pacer or default_pacer()
 
     async def close(self) -> None:
         if self._owns_client:
@@ -53,11 +62,13 @@ class SigenergyCloud:
         encoded = base64.b64encode(
             f"{self.config.app_key}:{self.config.app_secret}".encode()
         ).decode()
-        response = await self._client.post(
+        response = await self._pacer.request(
+            self._client,
+            "POST",
             f"{self.base_url}/openapi/auth/login/key",
+            service="inverter provider",
             json={"key": encoded},
         )
-        response.raise_for_status()
         payload = response.json()
         self._check(payload)
         data = self._decode_data(payload.get("data", {}))
@@ -72,14 +83,14 @@ class SigenergyCloud:
     async def _get(self, path: str) -> dict[str, Any]:
         if not self._token or time.time() >= self._token_expiry - 600:
             await self._authenticate()
-        response = await self._client.get(
+        response = await self._pacer.request(
+            self._client,
+            "GET",
             f"{self.base_url}{path}",
+            service="inverter provider",
             headers={"Authorization": f"Bearer {self._token}"},
             params={"systemId": self.config.system_id},
         )
-        if response.status_code == 429:
-            raise SigenergyError("Sigenergy rate limit reached")
-        response.raise_for_status()
         payload = response.json()
         self._check(payload)
         data = self._decode_data(payload.get("data", {}))
@@ -102,6 +113,8 @@ class SigenergyCloud:
 
     async def collect(self) -> Telemetry:
         system_id = self.config.system_id
+        if system_id is None:
+            raise SigenergyError("Sigenergy system identifier is unavailable")
         flow = await self._get(f"/openapi/systems/{system_id}/energyFlow")
         summary = await self._get(f"/openapi/systems/{system_id}/summary")
         item = normalize_telemetry(flow, summary)
