@@ -78,7 +78,12 @@ def test_root_supervisor_uses_encrypted_app_credential_and_one_job_jit() -> None
     assert "openssl dgst -sha256 -sign" in broker
     assert "access_tokens" in broker
     assert "generate-jitconfig" in acquire
-    assert "actions/runners/$runner_id" in acquire
+    assert '"orgs/$owner/actions/runners/generate-jitconfig"' in acquire
+    assert '"orgs/$owner/actions/runners?per_page=100"' in acquire
+    assert '"orgs/$owner/actions/runners/$runner_id"' in acquire
+    assert '"repos/$REPOSITORY/actions/runners' not in acquire
+    assert 'owner="${REPOSITORY%%/*}"' in acquire
+    assert '--field runner_group_id="$RUNNER_GROUP_ID"' in acquire
     assert acquire.count("$TOKEN_COMMAND 2>/dev/null") == 2
     assert "cleanup_required=true" in acquire
     assert acquire.index("generate-jitconfig") < acquire.index("cleanup_required=true", 100)
@@ -143,6 +148,10 @@ def test_toolchain_manifest_is_exact_and_build_reverifies_artifacts() -> None:
     assert "/opt/python/3.11/bin/python3.11" in dockerfile
     assert "/opt/python/3.12/bin/python3.12" in dockerfile
     assert "uv sync --directory /tmp/project --frozen --all-extras" in dockerfile
+    assert "UV_PROJECT_ENVIRONMENT=/opt/ci-tools/venv" in dockerfile
+    assert "/opt/ci-tools/bin/gitleaks" in dockerfile
+    assert "/opt/ci-tools/gitleaks.toml" in dockerfile
+    assert "chmod -R a-w /opt/ci-tools" in dockerfile
     build = (RUNNER / "build-images.sh").read_text(encoding="utf-8")
     assert "docker image inspect --format '{{.Id}}'" in build
     assert "RUNNER_IMAGE=%s" in build
@@ -175,6 +184,7 @@ def test_apparmor_allows_required_executable_mappings() -> None:
     policy = (RUNNER / "solar-ci-runner.apparmor").read_text(encoding="utf-8")
     for path in [
         "/opt/actions-runner/** mrix,",
+        "/opt/ci-tools/** mrix,",
         "/opt/python/** mrix,",
         "/opt/actions-runner/_work/** mrwkix,",
         "/opt/uv-cache/** mrwk,",
@@ -228,6 +238,26 @@ def test_fork_workflow_policy_is_verified_before_runner_activation() -> None:
     marker = (RUNNER / "check-acceptance.sh").read_text(encoding="utf-8")
     assert "actions/permissions/fork-pr-contributor-approval" in verifier
     assert '!= all_external_contributors' in verifier
+    assert '!= Organization' in verifier
+    assert ".default == false" in verifier
+    assert ".name == $name" in verifier
+    assert '.visibility == "selected"' in verifier
+    assert ".restricted_to_workflows == true" in verifier
+    assert ".selected_workflows == [$workflow]" in verifier
+    assert ".github/workflows/trusted-ci.yml@refs/heads/main" in verifier
+    assert "runner-groups/$RUNNER_GROUP_ID/repositories" in verifier
+    assert "[.[] | .repositories[]?.full_name] == [$repository]" in verifier
+    runner_env = (RUNNER / "runner.env.example").read_text(encoding="utf-8")
+    assert "REPLACE_WITH_ORGANIZATION" in runner_env
+    assert "NON_DEFAULT_ORGANIZATION_RUNNER_GROUP_ID" in runner_env
+    assert "RUNNER_GROUP_NAME=solar-public-ci" in runner_env
+    assert 'test "$RUNNER_GROUP_NAME" = solar-public-ci' in verifier
+    docs = (ROOT / "docs" / "self-hosted-ci.md").read_text(encoding="utf-8")
+    assert "personal-account repository cannot activate" in docs
+    assert "runner group named exactly\n`solar-public-ci`" in docs
+    assert "organization self-hosted-runners write" in docs
+    config = (RUNNER / "gitleaks.toml").read_text(encoding="utf-8")
+    assert "useDefault = true" in config
     assert "$TOKEN_COMMAND" in verifier
     assert "LoadCredentialEncrypted=github-app-key:" in policy_unit
     assert "verify-fork-policy.sh" in policy_unit

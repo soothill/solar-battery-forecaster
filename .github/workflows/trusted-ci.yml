@@ -15,7 +15,12 @@ jobs:
     if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
-    runs-on: [self-hosted, linux, x64, ic-dev, solar-public-ci, isolated, ephemeral, no-private-net]
+    outputs:
+      source_verified: ${{ steps.evidence.outputs.source_verified }}
+      source_tree: ${{ steps.evidence.outputs.source_tree }}
+    runs-on:
+      group: solar-public-ci
+      labels: [self-hosted, linux, x64, ic-dev, solar-public-ci, isolated, ephemeral, no-private-net]
     env:
       UV_CACHE_DIR: /opt/uv-cache
       UV_OFFLINE: "1"
@@ -25,48 +30,89 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
-      - name: Assert exact pull-request head
+      - id: evidence
+        name: Capture trusted security evidence
         env:
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
-      - name: Python 3.11 quality
         run: |
-          uv sync --python 3.11 --frozen --all-extras
-          uv run --frozen --python 3.11 ruff check .
-          uv run --frozen --python 3.11 pytest
-      - name: Python 3.12 quality, security, and build
+          set -euo pipefail
+          original="$GITHUB_WORKSPACE"
+          cd "$original"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          source_tree="$(git rev-parse 'HEAD^{tree}')"
+          audit_requirements="$(mktemp "$RUNNER_TEMP/audit.XXXXXX.txt")"
+          cleanup() {
+            rm -f "$audit_requirements"
+          }
+          trap cleanup EXIT
+
+          /opt/ci-tools/bin/gitleaks detect --source "$original" --no-banner --redact \
+            --config /opt/ci-tools/gitleaks.toml
+          /opt/ci-tools/venv/bin/bandit -q -r "$original/src"
+          /opt/ci-tools/bin/uv lock --check
+          /opt/ci-tools/bin/uv export --frozen --all-extras --no-emit-project \
+            --format requirements-txt --output-file "$audit_requirements"
+          /opt/ci-tools/venv/bin/pip-audit --requirement "$audit_requirements" \
+            --no-deps --disable-pip --progress-spinner off --vulnerability-service osv
+          /opt/ci-tools/venv/bin/ruff check "$original"
+
+          echo "source_verified=true" >> "$GITHUB_OUTPUT"
+          echo "source_tree=$source_tree" >> "$GITHUB_OUTPUT"
+
+      - name: Test and build disposable candidate
+        run: |
+          set -euo pipefail
+          original="$GITHUB_WORKSPACE"
+          candidate_dir="$(mktemp -d "$RUNNER_TEMP/candidate.XXXXXX")"
+          trap 'rm -rf "$candidate_dir"' EXIT
+
+          cp -a "$original/." "$candidate_dir/"
+          chmod -R a-w "$original"
+          (
+            unset GITHUB_ENV GITHUB_OUTPUT GITHUB_PATH GITHUB_STEP_SUMMARY GITHUB_WORKSPACE
+            cd "$candidate_dir"
+            /opt/ci-tools/bin/uv sync --python 3.11 --frozen --all-extras \
+              --no-install-project
+            PYTHONPATH="$candidate_dir/src" \
+              /opt/ci-tools/bin/uv run --no-sync --python 3.11 pytest
+            /opt/ci-tools/bin/uv sync --python 3.12 --frozen --all-extras \
+              --no-install-project
+            PYTHONPATH="$candidate_dir/src" \
+              /opt/ci-tools/bin/uv run --no-sync --python 3.12 pytest
+            .venv/bin/python -m build --no-isolation
+          )
+
+      - name: Recheck immutable source
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_TREE: ${{ steps.evidence.outputs.source_tree }}
         run: |
-          set -o pipefail
-          uv sync --python 3.12 --frozen --all-extras
-          uv run --frozen ruff check .
-          uv run --frozen pytest
-          uv run --frozen bandit -q -r src
-          uv run --frozen pip-audit --local --progress-spinner off \
-            --vulnerability-service osv
-          uv lock --check
-          gh api --paginate --slurp \
-            "repos/$GITHUB_REPOSITORY/dependency-graph/compare/$BASE_SHA...$HEAD_SHA" \
-            | uv run --frozen python -m solar_battery_forecaster.dependency_review
-          gitleaks detect --source . --no-banner --redact
-          uv run --frozen python -m build --no-isolation
+          set -euo pipefail
+          original="$GITHUB_WORKSPACE"
+          cd "$original"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          test -z "$(git status --porcelain --untracked-files=all)"
 
   publish-gates:
     needs: quality-run
     if: always()
     runs-on: ubuntu-latest
     environment: trusted-status-publisher
-    permissions: {}
+    permissions:
+      contents: read
     steps:
       - name: Publish exact-head required statuses without checkout
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           QUALITY_RESULT: ${{ needs.quality-run.result }}
+          SOURCE_VERIFIED: ${{ needs.quality-run.outputs.source_verified }}
+          SOURCE_TREE: ${{ needs.quality-run.outputs.source_tree }}
           BASE_REPOSITORY: ${{ github.repository }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          READONLY_GITHUB_TOKEN: ${{ github.token }}
           STATUS_APP_ID: ${{ secrets.STATUS_APP_ID }}
           STATUS_APP_INSTALLATION_ID: ${{ secrets.STATUS_APP_INSTALLATION_ID }}
           STATUS_APP_PRIVATE_KEY: ${{ secrets.STATUS_APP_PRIVATE_KEY }}
@@ -100,10 +146,40 @@ jobs:
           unset STATUS_APP_PRIVATE_KEY app_jwt unsigned signature payload header
           intake_state=failure
           quality_state=failure
+          dependency_state=failure
+          tree_state=failure
           if [ "$HEAD_REPOSITORY" = "$BASE_REPOSITORY" ]; then
             intake_state=success
+            if dependency_payload="$(
+              GH_TOKEN="$READONLY_GITHUB_TOKEN" gh api --paginate --slurp \
+                "repos/$GITHUB_REPOSITORY/dependency-graph/compare/$BASE_SHA...$HEAD_SHA"
+            )" && printf '%s' "$dependency_payload" | jq -e '
+              def changes:
+                if all(.[]; type == "array") then add else . end;
+              type == "array" and
+              (changes | all(.[];
+                type == "object" and
+                (.vulnerabilities | type == "array") and
+                (.vulnerabilities | length == 0)))
+            ' >/dev/null; then
+              dependency_state=success
+            fi
+            unset dependency_payload
+            remote_tree="$(
+              GH_TOKEN="$READONLY_GITHUB_TOKEN" gh api \
+                "repos/$GITHUB_REPOSITORY/git/commits/$HEAD_SHA" --jq '.tree.sha'
+            )" || remote_tree=""
+            if [ -n "$SOURCE_TREE" ] && [ "$remote_tree" = "$SOURCE_TREE" ]; then
+              tree_state=success
+            fi
+            unset remote_tree
           fi
-          if [ "$HEAD_REPOSITORY" = "$BASE_REPOSITORY" ] && [ "$QUALITY_RESULT" = success ]; then
+          unset READONLY_GITHUB_TOKEN
+          if [ "$HEAD_REPOSITORY" = "$BASE_REPOSITORY" ] \
+            && [ "$QUALITY_RESULT" = success ] \
+            && [ "$SOURCE_VERIFIED" = true ] \
+            && [ "$tree_state" = success ] \
+            && [ "$dependency_state" = success ]; then
             quality_state=success
           fi
           GH_TOKEN="$installation_token" gh api --method POST \

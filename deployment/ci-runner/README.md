@@ -24,8 +24,12 @@ blocked and cannot supply code.
 `install-host.sh` installs the root-owned systemd supervisor, timer, proxy lifecycle, firewall and
 validation helpers, and AppArmor profiles without starting them. Its GitHub App broker reads an
 encrypted systemd PEM credential, mints a short-lived installation token, requests a single-use JIT
-configuration, and pipes it to `run-once.sh`. The same App verifies that repository fork workflows
-require approval for `all_external_contributors`; operators must never approve fork runs. A separate
+configuration from the organization endpoint with the restricted group ID, and pipes it to
+`run-once.sh`. The same App verifies that repository fork workflows
+require approval for `all_external_contributors` and that the non-default organization runner group
+named exactly `solar-public-ci` selects only this repository and the protected-main trusted
+workflow; personal repositories fail
+closed. Operators must never approve fork runs. A separate
 status-only App exists solely in the protected GitHub publisher environment and is never installed
 on this host. The one-job runner mounts only a disposable tmpfs
 volume at `/opt/actions-runner/_work`; the timer re-arms only after it exits. Never persist or log

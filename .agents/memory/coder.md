@@ -46,3 +46,12 @@
   requires a fingerprint-bound executable host/egress/cleanup acceptance marker; failed JIT starts
   are paced and use a fresh installation token for best-effort stale-registration cleanup. Trusted
   tag release provenance remains GitHub-hosted.
+- 2026-09-05: CI security evidence precedes candidate execution. The isolated runner scans the
+  pristine exact-head checkout with immutable `/opt/ci-tools`, runs tests/build only in a disposable
+  copy, and revalidates the original HEAD/tree before success. Hosted trusted code performs the
+  dependency comparison. Activation additionally requires an organization-owned repository and a
+  non-default runner group selecting only that repository and protected-main workflow; personal
+  repositories fail closed.
+- 2026-09-05: Trusted CI publishes its immutable pre-candidate evidence outputs from a completed
+  step before candidate execution, and binds scheduling to the fixed `solar-public-ci` organization
+  runner group by both group name and ID so configuration drift fails closed.

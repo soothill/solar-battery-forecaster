@@ -1,0 +1,4 @@
+title = "Solar CI trusted gitleaks policy"
+
+[extend]
+useDefault = true

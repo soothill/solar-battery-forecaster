@@ -50,12 +50,18 @@ unchanged role gate or unchanged CI job merely to produce duplicate evidence.
 Minimize GitHub Actions jobs and triggers while retaining required independent evidence. Normal CI
 uses a protected-base `pull_request_target` definition: one sequential same-repository-only quality
 job on the ephemeral isolated `ic-dev` runner and one hosted no-checkout publisher for exact-head
-`intake` and `quality` statuses. Its workflow token has no permissions; a distinct status-only App
-credential is restricted to its protected environment. Untrusted quality code has only
+`intake` and `quality` statuses. The publisher's workflow token has only `contents: read` for
+dependency and Git-tree API reads, performs no checkout, and cannot write statuses; a distinct
+status-only App credential restricted to its protected environment performs only the status writes.
+Untrusted quality code has only
 `contents: read`. All external fork workflows require approval and must never be approved, so fork
 heads have absent required statuses and cannot reach
 the runner; reviewed changes are imported into the base repository and submitted in a replacement
-PR. Release provenance continues to use GitHub-hosted runners.
+PR. The self-hosted runner remains disabled unless the fixed `solar-public-ci` organization runner
+group selects only this repository and the protected-main trusted workflow. Security tools scan the pristine head from the
+immutable baked tool environment before candidate execution; candidate tests/build use a disposable
+copy, while dependency comparison remains hosted. Release provenance continues to use GitHub-hosted
+runners.
 
 ## Memory
 

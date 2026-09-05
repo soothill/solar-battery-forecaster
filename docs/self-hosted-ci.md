@@ -3,11 +3,13 @@
 Ordinary CI is anchored to protected `main` with `pull_request_target`. The exact immutable event
 origin permits `quality-run` only for same-repository heads; that sequential untrusted-code job runs
 on `ic-dev`, `solar-public-ci`, `isolated`, `ephemeral`, `no-private-net` and has only
-`contents: read`. An always-running hosted `publish-gates` job performs no checkout and has an empty
-workflow-token permission set. Inside the protected `trusted-status-publisher` environment it mints
-a short-lived installation token from a second, status-only GitHub App and posts final `intake` and
-`quality` statuses to the exact PR head. Protect those contexts with that App's integration ID, not
-merely their names or the workflow job names.
+`contents: read`. An always-running hosted `publish-gates` job performs no checkout and gives its
+workflow token only `contents: read` for dependency-graph and Git-tree API reads. That token cannot
+write statuses. Inside the protected
+`trusted-status-publisher` environment the job mints a short-lived installation token from a
+second, status-only GitHub App and uses only that App token to post final `intake` and `quality`
+statuses to the exact PR head. Protect those contexts with that App's integration ID, not merely
+their names or the workflow job names.
 
 Repository Actions policy must be `all_external_contributors`, and maintainers must never approve a
 fork workflow run. Fork pull requests therefore receive no required exact-head statuses and never
@@ -37,11 +39,42 @@ until a maintainer reviews its artifacts and rebuilds the runner image in stagin
 the installed environment; only advisory JSON from the explicitly allowlisted OSV API is reachable.
 Package indexes stay blocked.
 
+The image also retains a root-owned, read-only `/opt/ci-tools` environment containing the verified
+uv and gitleaks binaries, a frozen Bandit/pip-audit/Ruff virtual environment, and the reviewed
+gitleaks configuration. Immediately after exact-head checkout, the trusted workflow records HEAD
+and its Git tree digest, requires a clean tree, and runs gitleaks, Bandit, lock validation,
+dependency export/audit, and Ruff only from `/opt/ci-tools`. It does not install or execute candidate
+code first. That completed evidence step emits the clean source tree digest before any candidate
+execution. Tests and the no-isolation build then run in a separate disposable copy with GitHub
+command-file variables removed. Dependency synchronization uses `--no-install-project`, so it
+cannot invoke the candidate build backend or rely on an editable-install `.pth`; tests import the
+candidate explicitly through the disposable copy's `src` directory. Only the subsequent direct
+Python 3.12 no-isolation build invokes the candidate packaging backend. A final step requires the
+original checkout to retain the exact HEAD/tree digest and have no modifications or untracked
+files; it cannot replace or modify the pre-candidate evidence output consumed by the publisher.
+
+Dependency-graph comparison is not evaluated by candidate Python. The hosted protected publisher
+uses only its read-only normal workflow token to fetch the exact base-to-head comparison and trusted
+inline `jq` to reject malformed results or any vulnerability. It independently resolves the remote
+Git tree and compares it with the pre-candidate evidence output. `quality` becomes successful only
+when the complete local isolated job, pre-candidate evidence, remote tree comparison, and hosted
+dependency comparison all pass. Its distinct status App token is used only for the two status
+writes.
+
 The runner joins an internal Docker network and can reach only a separately hardened HTTPS CONNECT
 proxy. The proxy allowlist must cover the current GitHub Actions endpoints needed by the runner and
 checkout; it denies loopback, link-local, RFC1918, carrier-grade NAT, IPv6 local/link-local, and
 Tailscale ranges after DNS resolution. It publishes no host port. Fail closed if the proxy,
 AppArmor profile, internal network, immutable image digest, or egress acceptance tests are absent.
+
+GitHub runner workflow restrictions require an organization-level runner group. The current
+personal-account repository cannot activate this runner safely. Before installation, transfer or
+recreate the repository under an organization, create a non-default runner group named exactly
+`solar-public-ci`, select only this
+repository, and restrict the group to exactly
+`ORGANIZATION/REPOSITORY/.github/workflows/trusted-ci.yml@refs/heads/main`. The policy verifier
+derives that identity from `REPOSITORY` and rejects a personal owner, the default group, additional
+repositories or workflows, and any visibility other than `selected`.
 
 ## Installation and acceptance
 
@@ -57,9 +90,14 @@ dependencies and Git; the proxy base digest must provide Squid running as numeri
    the manifest URLs, verifies every SHA-256 in both the fetcher and Docker build, installs exact
    Python versions through the verified uv binary, warms the frozen dependency cache, and writes
    content-addressed image IDs to `images.env.candidate`. Scan and stage-test both images.
-2. Run `install-host.sh`. It installs root-owned helpers, AppArmor policies, and systemd units but
+2. Under the organization owner, create a non-default organization runner group named exactly
+   `solar-public-ci` with visibility `selected`. Select this repository and no other repository. Enable workflow restrictions and
+   select only `ORGANIZATION/REPOSITORY/.github/workflows/trusted-ci.yml@refs/heads/main`. Record the
+   numeric group ID; never use the default group. Run `install-host.sh`. It installs root-owned
+   helpers, AppArmor policies, and systemd units but
    deliberately starts nothing. Copy the reviewed candidate image IDs to root-owned mode-0600
    `/etc/solar-ci-runner/images.env` and fill `runner.env` with repository, numeric runner-group ID,
+   the fixed `RUNNER_GROUP_NAME=solar-public-ci`,
    GitHub App ID, and installation ID.
 3. Set the repository's fork pull-request workflow approval policy to
    `all_external_contributors`. Never approve a workflow run originating from a fork. Verify it with
@@ -70,9 +108,13 @@ dependencies and Git; the proxy base digest must provide Squid running as numeri
    using the runner-registration App and fail closed before requesting JIT configuration. Keep the
    timer disabled: `accept-host.sh` cannot create its activation marker until this policy check
    succeeds.
-4. Create a dedicated GitHub App installed only on this repository with metadata read and
-   repository administration/self-hosted-runner write permission. Do not use an existing broad gh
-   OAuth token. Encrypt its PEM private key for this host without committing it:
+4. Create a dedicated GitHub App installed on the organization but selected for only this
+   repository. Grant organization self-hosted-runners write for group inspection and organization-
+   scoped JIT/list/delete operations, plus repository metadata read and the minimum repository
+   Administration read needed for the fork-approval policy endpoint. Grant no contents, statuses,
+   secrets, or deployment permission.
+   Do not use an existing broad gh OAuth token. Encrypt its PEM private key for this host without
+   committing it:
 
    ```bash
    systemd-creds encrypt --name=github-app-key app-private-key.pem \
@@ -82,7 +124,8 @@ dependencies and Git; the proxy base digest must provide Squid running as numeri
 
    Systemd exposes the decrypted key only in the service credential directory. The root-owned
    broker creates a nine-minute App JWT, exchanges it for a short-lived installation token, calls
-   GitHub's JIT runner API, and pipes the one-use encoded configuration directly to the container.
+   GitHub's organization-scoped JIT runner API with the restricted group ID, and pipes the one-use
+   encoded configuration directly to the container.
    Neither credential is written to disk, logged, placed in the image, or passed to a workflow.
 5. Create a second GitHub App installed only on this repository. It must have only metadata read and
    commit-statuses write permission: no Actions administration, contents, deployments, secrets, or
@@ -90,7 +133,9 @@ dependencies and Git; the proxy base digest must provide Squid running as numeri
    `trusted-status-publisher`, restrict its deployment branches/tags to protected `main` only, and
    store this second App's values as environment secrets `STATUS_APP_ID`,
    `STATUS_APP_INSTALLATION_ID`, and `STATUS_APP_PRIVATE_KEY`. Never reuse or copy the runner App,
-   installation, or PEM. The hosted publisher's normal `GITHUB_TOKEN` has no permissions.
+   installation, or PEM. The hosted publisher's normal `GITHUB_TOKEN` has only `contents: read` for
+   dependency-graph and Git-tree API reads; the job performs no checkout, and that token cannot
+   write statuses.
 6. Run root-owned `/usr/local/libexec/solar-ci-runner/accept-host.sh`. This executable acceptance
    starts and structurally validates the proxy, launches the digest-pinned runner image with the
    production restrictions, proves GitHub and OSV CONNECT succeed, proves representative
@@ -122,11 +167,13 @@ all isolation and egress tests, then atomically replace `images.env`. Retain the
 rollback; never roll back credentials. Remove the runner registration, containers, volumes,
 networks, proxy, image digests, and GitHub App authorization to uninstall.
 
-The remaining site-specific inputs are the `ic-dev` Docker/AppArmor/iptables host, repository and
-runner-group IDs, the repository's `all_external_contributors` policy, a dedicated repository-only
-runner GitHub App ID/installation/new host-encrypted PEM, a distinct status-only App ID/installation/
-private key in the protected `trusted-status-publisher` environment, and live acceptance/ruleset
-evidence. No existing interactive GitHub CLI/OAuth token is an acceptable substitute.
+The remaining site-specific inputs are an organization-owned repository; a non-default group
+restricted to exactly that repository and trusted workflow; the `ic-dev` Docker/AppArmor/iptables
+host; repository and runner-group IDs; the repository's `all_external_contributors` policy; a
+least-privilege organization-installed runner GitHub App ID/installation/new host-encrypted PEM; a
+distinct status-only App ID/installation/private key in the protected `trusted-status-publisher`
+environment; and live acceptance/ruleset evidence. The present personal repository is therefore a
+hard activation blocker. No existing interactive GitHub CLI/OAuth token is an acceptable substitute.
 
 For rollback, disable the timer, let an active job finish (or cancel it and remove its stale runner
 registration), stop the runner and proxy, restore the previously accepted content image IDs, rerun
@@ -144,6 +191,12 @@ removed. Each legacy job checks out the event's exact head without persisting cr
 asserts `git rev-parse HEAD`. Do not weaken those four previously required legacy checks. Merge the
 first transition only when those exact-head checks and Product, Architecture, Tester, Security, and
 Reviewer approval all pass.
+
+During this one transition, the legacy `security` job runs exact-version Bandit and pip-audit tools
+outside the candidate environment plus the full-SHA-pinned gitleaks action. It validates/exports the
+lock without installing the project. The two matrix `test` jobs declare both `security` and
+`dependency-review` as prerequisites, so no candidate install, test, build backend, or build starts
+before both trusted evidence jobs succeed.
 
 After the trusted workflow is on protected `main`, set and verify `all_external_contributors`, create
 the two separate Apps and protected publisher environment, install and run host acceptance, then

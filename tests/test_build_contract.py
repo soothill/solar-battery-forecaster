@@ -24,4 +24,4 @@ def test_ci_build_disables_dependency_resolution_isolation() -> None:
 
     assert "uv sync --python 3.11 --frozen --all-extras" in workflow
     assert "uv sync --python 3.12 --frozen --all-extras" in workflow
-    assert "uv run --frozen python -m build --no-isolation" in workflow
+    assert "python -m build --no-isolation" in workflow

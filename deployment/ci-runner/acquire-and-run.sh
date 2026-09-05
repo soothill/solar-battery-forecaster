@@ -8,6 +8,7 @@ umask 077
 : "${RUN_ONCE:=/usr/local/libexec/solar-ci-runner/run-once.sh}"
 
 printf '%s' "$REPOSITORY" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
+owner="${REPOSITORY%%/*}"
 printf '%s' "$RUNNER_GROUP_ID" | grep -Eq '^[0-9]+$'
 test -x "$TOKEN_COMMAND"
 test "$(stat -c %U "$TOKEN_COMMAND")" = root
@@ -38,7 +39,7 @@ cleanup_stale_runner() {
   esac
   runner_pages="$(
     GH_TOKEN="$fresh_token" gh api --paginate --slurp \
-      "repos/$REPOSITORY/actions/runners?per_page=100" 2>/dev/null
+      "orgs/$owner/actions/runners?per_page=100" 2>/dev/null
   )" || runner_pages=""
   unset fresh_token
   runner_id="$(
@@ -54,7 +55,7 @@ cleanup_stale_runner() {
         ;;
       *)
         GH_TOKEN="$delete_token" gh api --method DELETE \
-          "repos/$REPOSITORY/actions/runners/$runner_id" >/dev/null 2>&1 \
+          "orgs/$owner/actions/runners/$runner_id" >/dev/null 2>&1 \
           || echo "stale runner cleanup failed; inspect repository runner registrations" >&2
         ;;
     esac
@@ -64,7 +65,7 @@ cleanup_stale_runner() {
 trap cleanup_stale_runner EXIT HUP INT TERM
 jit_response="$(
   GH_TOKEN="$access_token" gh api --method POST \
-    "repos/$REPOSITORY/actions/runners/generate-jitconfig" \
+    "orgs/$owner/actions/runners/generate-jitconfig" \
     --raw-field name="$runner_name" \
     --field runner_group_id="$RUNNER_GROUP_ID" \
     --raw-field work_folder="_work" \
