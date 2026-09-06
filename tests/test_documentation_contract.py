@@ -370,10 +370,68 @@ def test_outage_acceptance_selects_exactly_one_property_without_mutating_main_co
         "os.O_EXCL | os.O_NOFOLLOW",
         "os.fchown(descriptor, 0, grp.getgrnam(\"solar-config\").gr_gid)",
         "os.fchmod(descriptor, 0o640)",
-        "trap cleanup_acceptance_config EXIT",
+        "expected_destination = Path(\"/etc/solar-battery-forecaster/acceptance-outage.yaml\")",
         "pending records increased from zero to one",
         "increased by exactly one",
     ]:
         assert required in guide
     assert "cp --preserve=mode,ownership /etc/solar-battery-forecaster/config.yaml" not in guide
     assert "sed -i" not in guide
+
+
+def test_outage_cleanup_is_armed_before_generation_and_preserves_existing_residue(
+    tmp_path: Path,
+) -> None:
+    guide = GUIDE.read_text(encoding="utf-8")
+    outage_block = next(
+        block
+        for block in re.findall(r"```bash\n(.*?)\n```", guide, flags=re.DOTALL)
+        if "solar-battery-outage-test@telemetry.service" in block
+    )
+    generator = outage_block.index(
+        "/opt/solar-battery-forecaster/.venv/bin/python"
+    )
+    preflight = outage_block.index('if [[ -e "$acceptance_config"')
+    trap = outage_block.index("trap cleanup_acceptance_config EXIT")
+    assert preflight < trap < generator
+
+    documented_path = "/etc/solar-battery-forecaster/acceptance-outage.yaml"
+    prefix = outage_block.split("property_alias=home-01", 1)[0]
+    acceptance_path = tmp_path / "acceptance-outage.yaml"
+    replacement = f"acceptance_config={shlex.quote(str(acceptance_path))}"
+    prefix = prefix.replace(f"acceptance_config={documented_path}", replacement)
+    assert documented_path not in prefix
+
+    generator_failure = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"{prefix}\npython3 - \"$acceptance_config\" <<'PY'\n"
+            "from pathlib import Path\n"
+            "import sys\n"
+            'Path(sys.argv[1]).write_text("generated", encoding="utf-8")\n'
+            "raise SystemExit(23)\n"
+            "PY",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert generator_failure.returncode == 23
+    assert not acceptance_path.exists()
+
+    acceptance_path.write_text("unexplained residue", encoding="utf-8")
+    after_preflight = tmp_path / "after-preflight"
+    residue_result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"{prefix}\nprintf reached > {shlex.quote(str(after_preflight))}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert residue_result.returncode != 0
+    assert acceptance_path.read_text(encoding="utf-8") == "unexplained residue"
+    assert not after_preflight.exists()

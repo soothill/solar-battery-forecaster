@@ -76,5 +76,7 @@
   those exact CLI arguments and prevent documentation from reintroducing shell sourcing.
 - 2026-09-06: Executable acceptance blocks run Bash with `set -euo pipefail`, including pipelines
   whose missing match must fail. Outage acceptance uses a safely parsed, one-property temporary
-  YAML so one provider collection maps to one pending record, one drain and one new timestamp;
-  automatic restart evidence separately requires a bounded SIGKILL test and increased `NRestarts`.
+  YAML so one provider collection maps to one pending record, one drain and one new timestamp. Its
+  fixed path is rejected if pre-existing and protected by an absence-safe EXIT trap established
+  before generation. Automatic restart evidence separately requires a bounded SIGKILL test and
+  increased `NRestarts`.

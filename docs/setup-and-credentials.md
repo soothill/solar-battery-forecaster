@@ -656,17 +656,31 @@ from(bucket: "solar_telemetry")
 Record the baseline count, then use the installed virtual environment's PyYAML parser to select
 exactly one property and create a new root-owned temporary file with an unreachable Influx URL.
 The quoted Python here-document does not evaluate the YAML or environment placeholders as shell
-code. Replace `home-01` with the same non-identifying alias used in the query. The final output must
-be `selected property home-01; Influx URL http://127.0.0.1:9` (with the chosen alias) followed by
+code. Before anything can create the fixed temporary path, the block fails if that path already
+exists (including as a symlink); it never reuses or deletes unexplained residue. It then installs an
+absence-safe EXIT trap before invoking Python, so a generator failure after file creation still
+removes this run's temporary file. Replace `home-01` with the same non-identifying alias used in the
+query. The final output must be
+`selected property home-01; Influx URL http://127.0.0.1:9` (with the chosen alias) followed by
 `root:solar-config 640`.
 
 **Run inside the LXC as root:**
 
 ```bash
 set -euo pipefail
+acceptance_config=/etc/solar-battery-forecaster/acceptance-outage.yaml
+if [[ -e "$acceptance_config" || -L "$acceptance_config" ]]; then
+  echo "unexpected existing acceptance path; investigate without deleting it" >&2
+  exit 1
+fi
+cleanup_acceptance_config() {
+  rm -f -- "$acceptance_config"
+}
+trap cleanup_acceptance_config EXIT
 property_alias=home-01
 systemctl stop solar-battery-telemetry.service
-/opt/solar-battery-forecaster/.venv/bin/python - "$property_alias" <<'PY'
+/opt/solar-battery-forecaster/.venv/bin/python - \
+  "$property_alias" "$acceptance_config" <<'PY'
 import grp
 import os
 import sys
@@ -675,8 +689,11 @@ from pathlib import Path
 import yaml
 
 source = Path("/etc/solar-battery-forecaster/config.yaml")
-destination = Path("/etc/solar-battery-forecaster/acceptance-outage.yaml")
+expected_destination = Path("/etc/solar-battery-forecaster/acceptance-outage.yaml")
 alias = sys.argv[1]
+destination = Path(sys.argv[2])
+if destination != expected_destination:
+    raise SystemExit("temporary configuration path is not the fixed acceptance path")
 config = yaml.safe_load(source.read_text(encoding="utf-8"))
 matches = [item for item in config["properties"] if item.get("id") == alias]
 if len(matches) != 1:
@@ -696,13 +713,9 @@ if written["influxdb"]["url"] != "http://127.0.0.1:9":
     raise SystemExit("temporary configuration Influx URL is not isolated")
 print(f"selected property {alias}; Influx URL {written['influxdb']['url']}")
 PY
-cleanup_acceptance_config() {
-  rm -- /etc/solar-battery-forecaster/acceptance-outage.yaml
-}
-trap cleanup_acceptance_config EXIT
-test "$(stat -c '%U:%G %a' /etc/solar-battery-forecaster/acceptance-outage.yaml)" = \
+test "$(stat -c '%U:%G %a' "$acceptance_config")" = \
   'root:solar-config 640'
-stat -c '%U:%G %a' /etc/solar-battery-forecaster/acceptance-outage.yaml
+stat -c '%U:%G %a' "$acceptance_config"
 if systemctl start solar-battery-outage-test@telemetry.service; then
   echo 'unexpected direct-write success' >&2
   exit 1
