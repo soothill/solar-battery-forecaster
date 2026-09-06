@@ -657,10 +657,11 @@ Record the baseline count, then use the installed virtual environment's PyYAML p
 exactly one property and create a new root-owned temporary file with an unreachable Influx URL.
 The quoted Python here-document does not evaluate the YAML or environment placeholders as shell
 code. Before anything can create the fixed temporary path, the block fails if that path already
-exists (including as a symlink); it never reuses or deletes unexplained residue. It then installs an
-absence-safe EXIT trap before invoking Python, so a generator failure after file creation still
-removes this run's temporary file. Replace `home-01` with the same non-identifying alias used in the
-query. The final output must be
+exists (including as a symlink); it never reuses or deletes unexplained residue. It then records
+whether telemetry was active and installs failure-safe EXIT and catchable-signal traps before
+invoking Python. Those traps remove only this run's temporary file, reset the expected failed
+transient unit, and restore telemetry only when it was active before the test. Replace `home-01`
+with the same non-identifying alias used in the query. The configuration output must be
 `selected property home-01; Influx URL http://127.0.0.1:9` (with the chosen alias) followed by
 `root:solar-config 640`.
 
@@ -673,12 +674,43 @@ if [[ -e "$acceptance_config" || -L "$acceptance_config" ]]; then
   echo "unexpected existing acceptance path; investigate without deleting it" >&2
   exit 1
 fi
-cleanup_acceptance_config() {
-  rm -f -- "$acceptance_config"
+telemetry_service=solar-battery-telemetry.service
+telemetry_state="$(systemctl is-active "$telemetry_service" || true)"
+case "$telemetry_state" in
+  active) telemetry_was_active=true ;;
+  inactive) telemetry_was_active=false ;;
+  *) echo "telemetry must initially be active or inactive, not $telemetry_state" >&2; exit 1 ;;
+esac
+cleanup_and_restore() {
+  local cleanup_failed=0 current_state
+  rm -f -- "$acceptance_config" || cleanup_failed=1
+  systemctl reset-failed solar-battery-outage-test@telemetry.service \
+    || cleanup_failed=1
+  if [[ "$telemetry_was_active" == true ]]; then
+    systemctl start "$telemetry_service" || cleanup_failed=1
+  else
+    current_state="$(systemctl is-active "$telemetry_service" || true)"
+    if [[ "$current_state" != inactive ]]; then
+      echo "telemetry was initially inactive but is now $current_state" >&2
+      cleanup_failed=1
+    fi
+  fi
+  return "$cleanup_failed"
 }
-trap cleanup_acceptance_config EXIT
+finish_acceptance() {
+  local original_status="$1"
+  trap - EXIT HUP INT TERM
+  if ! cleanup_and_restore; then
+    echo 'acceptance cleanup or telemetry restoration failed' >&2
+    exit 125
+  fi
+  exit "$original_status"
+}
+trap 'finish_acceptance $?' EXIT
+trap 'finish_acceptance 129' HUP
+trap 'finish_acceptance 130' INT
+trap 'finish_acceptance 143' TERM
 property_alias=home-01
-systemctl stop solar-battery-telemetry.service
 /opt/solar-battery-forecaster/.venv/bin/python - \
   "$property_alias" "$acceptance_config" <<'PY'
 import grp
@@ -716,6 +748,7 @@ PY
 test "$(stat -c '%U:%G %a' "$acceptance_config")" = \
   'root:solar-config 640'
 stat -c '%U:%G %a' "$acceptance_config"
+systemctl stop "$telemetry_service"
 if systemctl start solar-battery-outage-test@telemetry.service; then
   echo 'unexpected direct-write success' >&2
   exit 1
@@ -725,19 +758,6 @@ systemctl show solar-battery-outage-test@telemetry.service \
 systemctl start solar-battery-outbox-status@telemetry.service
 journalctl -u solar-battery-outbox-status@telemetry.service -o cat --no-pager \
   | grep '^{' | tail -n 1
-```
-
-The outage unit must report `Result=exit-code` and `ExecMainStatus=1`: the selected property's
-provider collection succeeded but the intentionally unreachable Influx destination left one
-undelivered record. Because the temporary YAML contains exactly one property, status must show
-pending records increased from zero to one, with no quarantine or blocked stream. The block's EXIT
-trap securely removes the exact temporary file on success or error. Drain using the real
-configuration while the continuous writer remains stopped, and check the empty status.
-
-**Run inside the LXC as root:**
-
-```bash
-set -euo pipefail
 systemctl reset-failed solar-battery-outage-test@telemetry.service
 systemctl start solar-battery-outbox-drain@telemetry.service
 journalctl -u solar-battery-outbox-drain@telemetry.service -o cat --no-pager \
@@ -745,13 +765,25 @@ journalctl -u solar-battery-outbox-drain@telemetry.service -o cat --no-pager \
 systemctl start solar-battery-outbox-status@telemetry.service
 journalctl -u solar-battery-outbox-status@telemetry.service -o cat --no-pager \
   | grep '^{' | tail -n 1
-systemctl start solar-battery-telemetry.service
 ```
 
-Drain output must say `delivered 1 record(s)` and status must return to zero pending records. Repeat
-the earlier administrator query: the count must have increased by exactly one, demonstrating one
-confirmed Influx timestamp after replay. If any prerequisite or expected result differs, stop the
-test and investigate; do not delete, retry, or mutate the outbox manually.
+The outage unit must report `Result=exit-code` and `ExecMainStatus=1`: the selected property's
+provider collection succeeded but the intentionally unreachable Influx destination left one
+undelivered record. Because the temporary YAML contains exactly one property, the first status must
+show pending records increased from zero to one, with no quarantine or blocked stream. Drain output
+must then say `delivered 1 record(s)` and the final status must return to zero pending records.
+
+On success, error, HUP, INT, or TERM, the trap removes the exact temporary file, resets the expected
+failed transient unit, and restores telemetry if and only if it was active before the exercise. A
+successful restoration preserves the command's original exit status; cleanup or restoration
+failure exits 125 and requires operator attention. Bash cannot run a trap after SIGKILL, kernel or
+host failure, or power loss. After one of those events, inspect the fixed path and the intended
+telemetry state before proceeding; the preflight deliberately refuses to delete residue.
+
+Repeat the earlier administrator query after the LXC block has completed: the count must have
+increased by exactly one, demonstrating one confirmed Influx timestamp after replay. If any
+prerequisite or expected result differs, stop the test and investigate; do not delete, retry, or
+mutate the outbox manually.
 
 ### Local dashboard status freshness
 

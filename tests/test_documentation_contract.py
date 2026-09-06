@@ -1,4 +1,5 @@
 import configparser
+import os
 import re
 import shlex
 import subprocess
@@ -392,8 +393,14 @@ def test_outage_cleanup_is_armed_before_generation_and_preserves_existing_residu
         "/opt/solar-battery-forecaster/.venv/bin/python"
     )
     preflight = outage_block.index('if [[ -e "$acceptance_config"')
-    trap = outage_block.index("trap cleanup_acceptance_config EXIT")
+    trap = outage_block.index("trap 'finish_acceptance $?' EXIT")
     assert preflight < trap < generator
+    for handler in [
+        "trap 'finish_acceptance 129' HUP",
+        "trap 'finish_acceptance 130' INT",
+        "trap 'finish_acceptance 143' TERM",
+    ]:
+        assert handler in outage_block
 
     documented_path = "/etc/solar-battery-forecaster/acceptance-outage.yaml"
     prefix = outage_block.split("property_alias=home-01", 1)[0]
@@ -401,6 +408,34 @@ def test_outage_cleanup_is_armed_before_generation_and_preserves_existing_residu
     replacement = f"acceptance_config={shlex.quote(str(acceptance_path))}"
     prefix = prefix.replace(f"acceptance_config={documented_path}", replacement)
     assert documented_path not in prefix
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_systemctl = fake_bin / "systemctl"
+    fake_systemctl.write_text(
+        """#!/bin/bash
+set -euo pipefail
+command=$1
+shift
+case "$command" in
+  is-active) cat "$FAKE_STATE_FILE"; test "$(cat "$FAKE_STATE_FILE")" = active ;;
+  start) test "$1" != solar-battery-telemetry.service || printf active > "$FAKE_STATE_FILE" ;;
+  reset-failed) : ;;
+  *) exit 64 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_systemctl.chmod(0o755)
+    state_file = tmp_path / "state"
+    state_file.write_text("active", encoding="utf-8")
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": f"{fake_bin}:{environment['PATH']}",
+            "FAKE_STATE_FILE": str(state_file),
+        }
+    )
 
     generator_failure = subprocess.run(
         [
@@ -416,6 +451,7 @@ def test_outage_cleanup_is_armed_before_generation_and_preserves_existing_residu
         check=False,
         capture_output=True,
         text=True,
+        env=environment,
     )
     assert generator_failure.returncode == 23
     assert not acceptance_path.exists()
@@ -431,7 +467,140 @@ def test_outage_cleanup_is_armed_before_generation_and_preserves_existing_residu
         check=False,
         capture_output=True,
         text=True,
+        env=environment,
     )
     assert residue_result.returncode != 0
     assert acceptance_path.read_text(encoding="utf-8") == "unexplained residue"
     assert not after_preflight.exists()
+
+
+def test_outage_scope_restores_only_an_originally_active_telemetry_service(
+    tmp_path: Path,
+) -> None:
+    guide = GUIDE.read_text(encoding="utf-8")
+    outage_block = next(
+        block
+        for block in re.findall(r"```bash\n(.*?)\n```", guide, flags=re.DOTALL)
+        if "solar-battery-outage-test@telemetry.service" in block
+    )
+    documented_path = "/etc/solar-battery-forecaster/acceptance-outage.yaml"
+    prefix = outage_block.split("property_alias=home-01", 1)[0]
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_systemctl = fake_bin / "systemctl"
+    fake_systemctl.write_text(
+        """#!/bin/bash
+set -euo pipefail
+command=$1
+shift
+printf '%s %s\n' "$command" "$*" >> "$FAKE_LOG_FILE"
+case "$command" in
+  is-active)
+    cat "$FAKE_STATE_FILE"
+    test "$(cat "$FAKE_STATE_FILE")" = active
+    ;;
+  stop)
+    test "$1" != solar-battery-telemetry.service || printf inactive > "$FAKE_STATE_FILE"
+    ;;
+  start)
+    if [[ "$1" == solar-battery-outbox-drain@telemetry.service \
+          && "${FAKE_FAIL_DRAIN:-0}" == 1 ]]; then
+      exit 42
+    fi
+    if [[ "$1" == solar-battery-telemetry.service ]]; then
+      if [[ "${FAKE_FAIL_RESTORE:-0}" == 1 ]]; then
+        exit 55
+      fi
+      printf active > "$FAKE_STATE_FILE"
+    fi
+    ;;
+  reset-failed) : ;;
+  *) exit 64 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_systemctl.chmod(0o755)
+
+    def run_failure(
+        name: str, initial_state: str, body: str, **extra_environment: str
+    ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
+        scenario = tmp_path / name
+        scenario.mkdir()
+        acceptance_path = scenario / "acceptance-outage.yaml"
+        state_file = scenario / "state"
+        log_file = scenario / "systemctl.log"
+        state_file.write_text(initial_state, encoding="utf-8")
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "PATH": f"{fake_bin}:{environment['PATH']}",
+                "FAKE_STATE_FILE": str(state_file),
+                "FAKE_LOG_FILE": str(log_file),
+                **extra_environment,
+            }
+        )
+        scenario_prefix = prefix.replace(
+            f"acceptance_config={documented_path}",
+            f"acceptance_config={shlex.quote(str(acceptance_path))}",
+        )
+        result = subprocess.run(
+            ["bash", "-c", f'{scenario_prefix}\ntouch "$acceptance_config"\n{body}'],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        return result, acceptance_path, state_file, log_file
+
+    successful_run, config, state, _ = run_failure(
+        "success",
+        "active",
+        'systemctl stop "$telemetry_service"\ntrue',
+    )
+    assert successful_run.returncode == 0
+    assert not config.exists()
+    assert state.read_text(encoding="utf-8") == "active"
+
+    after_stop, config, state, log = run_failure(
+        "after-stop",
+        "active",
+        'systemctl stop "$telemetry_service"\nfalse',
+    )
+    assert after_stop.returncode == 1
+    assert not config.exists()
+    assert state.read_text(encoding="utf-8") == "active"
+    assert "start solar-battery-telemetry.service" in log.read_text(encoding="utf-8")
+
+    during_replay, config, state, log = run_failure(
+        "during-replay",
+        "active",
+        'systemctl stop "$telemetry_service"\n'
+        "systemctl start solar-battery-outbox-drain@telemetry.service",
+        FAKE_FAIL_DRAIN="1",
+    )
+    assert during_replay.returncode == 42
+    assert not config.exists()
+    assert state.read_text(encoding="utf-8") == "active"
+    assert "start solar-battery-telemetry.service" in log.read_text(encoding="utf-8")
+
+    initially_inactive, config, state, log = run_failure(
+        "initially-inactive",
+        "inactive",
+        'systemctl stop "$telemetry_service"\nfalse',
+    )
+    assert initially_inactive.returncode == 1
+    assert not config.exists()
+    assert state.read_text(encoding="utf-8") == "inactive"
+    assert "start solar-battery-telemetry.service" not in log.read_text(encoding="utf-8")
+
+    restoration_failure, config, state, _ = run_failure(
+        "restoration-failure",
+        "active",
+        'systemctl stop "$telemetry_service"\nfalse',
+        FAKE_FAIL_RESTORE="1",
+    )
+    assert restoration_failure.returncode == 125
+    assert not config.exists()
+    assert state.read_text(encoding="utf-8") == "inactive"
