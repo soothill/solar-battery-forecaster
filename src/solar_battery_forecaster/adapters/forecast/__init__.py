@@ -1,0 +1,2 @@
+"""Solar forecast adapters."""
+

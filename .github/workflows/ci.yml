@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    env:
+      TRUSTED_TOOLS_SHA: 784f1c8e2010233a6c5c9fe0cadd4c95b40f5983
+      UV_PYTHON_DOWNLOADS: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Assert exact pull-request head
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test "$(git cat-file -t "$TRUSTED_TOOLS_SHA")" = commit
+          git merge-base --is-ancestor "$TRUSTED_TOOLS_SHA" HEAD
+          test "$(git rev-parse "$TRUSTED_TOOLS_SHA^{tree}")" = \
+            e1ac0e386ef08b4f94da709e962b913558158289
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12.14"
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.12.10"
+          checksum: "173d95a0c32d18c896c46ba6fafbf3cf9c14ab74b033f81b76c883ef492a976b"
+          enable-cache: false
+      - name: Run pinned security tools without installing candidate code
+        run: |
+          set -euo pipefail
+          unset UV_CONFIG_FILE UV_INDEX UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL
+          unset UV_FIND_LINKS PIP_CONFIG_FILE PIP_INDEX_URL PIP_EXTRA_INDEX_URL
+          trusted_root="$(mktemp -d "$RUNNER_TEMP/trusted-tools.XXXXXX")"
+          audit_requirements="$(mktemp "$RUNNER_TEMP/candidate-audit.XXXXXX.txt")"
+          chmod 0700 "$trusted_root"
+          cleanup() {
+            rm -rf "$trusted_root"
+            rm -f "$audit_requirements"
+          }
+          trap cleanup EXIT
+          for trusted_file in pyproject.toml uv.lock README.md; do
+            git show "$TRUSTED_TOOLS_SHA:$trusted_file" > "$trusted_root/$trusted_file"
+          done
+          cd "$trusted_root"
+          printf '%s  %s\n' \
+            d3f7a8b899184b5fc196f95e8711485050626ceb59d9baf064c61a855460733d \
+            pyproject.toml \
+            93c9f3466836c79c784ef1c21c82c7afccf4081f5a1e131ab8141e0e248a6f50 \
+            uv.lock \
+            424930dde720a3a56567e39e8ed6a1d358a36526c8f4a4d49325bd30058f36c1 \
+            README.md | sha256sum --check --strict
+          uv_bin="$(realpath "$(command -v uv)")"
+          python_bin="$(realpath "$(command -v python)")"
+          "$uv_bin" --version | grep -Eq '^uv 0\.12\.10([[:space:]]|$)'
+          test "$("$python_bin" --version)" = "Python 3.12.14"
+          UV_PROJECT_ENVIRONMENT="$trusted_root/.venv" \
+            UV_CACHE_DIR="$trusted_root/uv-cache" \
+            "$uv_bin" --no-config sync --directory "$trusted_root" --frozen --all-extras \
+              --no-install-project --python "$python_bin"
+          "$trusted_root/.venv/bin/bandit" -q -r \
+            "$GITHUB_WORKSPACE/src" "$GITHUB_WORKSPACE/deployment/ci-runner"
+          "$uv_bin" --no-config export --directory "$GITHUB_WORKSPACE" \
+            --frozen --all-extras --no-emit-project --format requirements-txt \
+            --output-file "$audit_requirements"
+          "$trusted_root/.venv/bin/pip-audit" \
+            --requirement "$audit_requirements" \
+            --no-deps --disable-pip --progress-spinner off --vulnerability-service osv
+          cd "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Assert exact pull-request head
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+
+  test:
+    needs: [security, dependency-review]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Assert exact pull-request head
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --all-extras
+      - run: uv run ruff check .
+      - run: uv run pytest
+      - run: uv run --frozen python -m build --no-isolation

@@ -1,0 +1,38 @@
+[Unit]
+Description=One-job ephemeral Solar CI runner
+Requires=docker.service solar-ci-proxy.service
+After=docker.service solar-ci-proxy.service network-online.target
+ConditionPathExists=/var/lib/solar-ci-runner/acceptance.ok
+StartLimitIntervalSec=30min
+StartLimitBurst=6
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/solar-ci-runner/images.env
+EnvironmentFile=/etc/solar-ci-runner/runner.env
+LoadCredentialEncrypted=github-app-key:/etc/credstore.encrypted/solar-ci-runner-github-app-key
+RuntimeDirectory=solar-ci-runner
+RuntimeDirectoryMode=0700
+StateDirectory=solar-ci-runner
+StateDirectoryMode=0700
+ExecCondition=/usr/local/libexec/solar-ci-runner/check-acceptance.sh
+ExecCondition=/usr/local/libexec/solar-ci-runner/verify-fork-policy.sh
+ExecStartPre=/usr/local/libexec/solar-ci-runner/validate-host.sh
+ExecStart=/usr/bin/flock --nonblock /run/solar-ci-runner/supervisor.lock /usr/local/libexec/solar-ci-runner/acquire-and-run.sh
+TimeoutStopSec=90
+KillMode=mixed
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

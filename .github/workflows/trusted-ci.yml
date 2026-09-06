@@ -1,0 +1,195 @@
+name: Trusted CI
+
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: quality-${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  quality-run:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+    outputs:
+      source_verified: ${{ steps.evidence.outputs.source_verified }}
+      source_tree: ${{ steps.evidence.outputs.source_tree }}
+    runs-on:
+      group: solar-public-ci
+      labels: [self-hosted, linux, x64, ic-dev, solar-public-ci, isolated, ephemeral, no-private-net]
+    env:
+      UV_CACHE_DIR: /opt/uv-cache
+      UV_OFFLINE: "1"
+      SOLAR_REQUIRE_BROWSER_TESTS: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - id: evidence
+        name: Capture trusted security evidence
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          original="$GITHUB_WORKSPACE"
+          cd "$original"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          source_tree="$(git rev-parse 'HEAD^{tree}')"
+          audit_requirements="$(mktemp "$RUNNER_TEMP/audit.XXXXXX.txt")"
+          cleanup() {
+            rm -f "$audit_requirements"
+          }
+          trap cleanup EXIT
+
+          /opt/ci-tools/bin/gitleaks detect --source "$original" --no-banner --redact \
+            --config /opt/ci-tools/gitleaks.toml
+          /opt/ci-tools/venv/bin/bandit -q -r "$original/src"
+          /opt/ci-tools/bin/uv lock --check
+          /opt/ci-tools/bin/uv export --frozen --all-extras --no-emit-project \
+            --format requirements-txt --output-file "$audit_requirements"
+          /opt/ci-tools/venv/bin/pip-audit --requirement "$audit_requirements" \
+            --no-deps --disable-pip --progress-spinner off --vulnerability-service osv
+          /opt/ci-tools/venv/bin/ruff check "$original"
+
+          echo "source_verified=true" >> "$GITHUB_OUTPUT"
+          echo "source_tree=$source_tree" >> "$GITHUB_OUTPUT"
+
+      - name: Test and build disposable candidate
+        run: |
+          set -euo pipefail
+          original="$GITHUB_WORKSPACE"
+          candidate_dir="$(mktemp -d "$RUNNER_TEMP/candidate.XXXXXX")"
+          trap 'rm -rf "$candidate_dir"' EXIT
+
+          cp -a "$original/." "$candidate_dir/"
+          chmod -R a-w "$original"
+          (
+            unset GITHUB_ENV GITHUB_OUTPUT GITHUB_PATH GITHUB_STEP_SUMMARY GITHUB_WORKSPACE
+            cd "$candidate_dir"
+            /opt/ci-tools/bin/node --version
+            /opt/ci-tools/bin/uv sync --python 3.11 --frozen --all-extras \
+              --no-install-project
+            PYTHONPATH="$candidate_dir/src" \
+              /opt/ci-tools/bin/uv run --no-sync --python 3.11 pytest
+            /opt/ci-tools/bin/uv sync --python 3.12 --frozen --all-extras \
+              --no-install-project
+            PYTHONPATH="$candidate_dir/src" \
+              /opt/ci-tools/bin/uv run --no-sync --python 3.12 pytest
+            .venv/bin/python -m build --no-isolation
+          )
+
+      - name: Recheck immutable source
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_TREE: ${{ steps.evidence.outputs.source_tree }}
+        run: |
+          set -euo pipefail
+          original="$GITHUB_WORKSPACE"
+          cd "$original"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$EXPECTED_TREE"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+  publish-gates:
+    needs: quality-run
+    if: always()
+    runs-on: ubuntu-latest
+    environment: trusted-status-publisher
+    permissions:
+      contents: read
+    steps:
+      - name: Publish exact-head required statuses without checkout
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          QUALITY_RESULT: ${{ needs.quality-run.result }}
+          SOURCE_VERIFIED: ${{ needs.quality-run.outputs.source_verified }}
+          SOURCE_TREE: ${{ needs.quality-run.outputs.source_tree }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          READONLY_GITHUB_TOKEN: ${{ github.token }}
+          STATUS_APP_ID: ${{ secrets.STATUS_APP_ID }}
+          STATUS_APP_INSTALLATION_ID: ${{ secrets.STATUS_APP_INSTALLATION_ID }}
+          STATUS_APP_PRIVATE_KEY: ${{ secrets.STATUS_APP_PRIVATE_KEY }}
+        run: |
+          set -eu
+          if ! printf '%s' "$HEAD_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Invalid pull-request head SHA." >&2
+            exit 1
+          fi
+          printf '%s' "$STATUS_APP_ID" | grep -Eq '^[0-9]+$'
+          printf '%s' "$STATUS_APP_INSTALLATION_ID" | grep -Eq '^[0-9]+$'
+          key_file="$(mktemp "$RUNNER_TEMP/status-app-key.XXXXXX")"
+          trap 'rm -f "$key_file"' EXIT
+          chmod 0600 "$key_file"
+          printf '%s' "$STATUS_APP_PRIVATE_KEY" > "$key_file"
+          base64url() {
+            openssl base64 -A | tr '+/' '-_' | tr -d '='
+          }
+          issued_at="$(($(date +%s) - 60))"
+          expires_at="$((issued_at + 540))"
+          header="$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url)"
+          payload="$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' \
+            "$issued_at" "$expires_at" "$STATUS_APP_ID" | base64url)"
+          unsigned="$header.$payload"
+          signature="$(printf '%s' "$unsigned" | openssl dgst -sha256 -sign "$key_file" | base64url)"
+          app_jwt="$unsigned.$signature"
+          installation_token="$(
+            GH_TOKEN="$app_jwt" gh api --method POST \
+              "app/installations/$STATUS_APP_INSTALLATION_ID/access_tokens" --jq '.token'
+          )"
+          unset STATUS_APP_PRIVATE_KEY app_jwt unsigned signature payload header
+          intake_state=failure
+          quality_state=failure
+          dependency_state=failure
+          tree_state=failure
+          if [ "$HEAD_REPOSITORY" = "$BASE_REPOSITORY" ]; then
+            intake_state=success
+            if dependency_payload="$(
+              GH_TOKEN="$READONLY_GITHUB_TOKEN" gh api --paginate --slurp \
+                "repos/$GITHUB_REPOSITORY/dependency-graph/compare/$BASE_SHA...$HEAD_SHA"
+            )" && printf '%s' "$dependency_payload" | jq -e '
+              def changes:
+                if all(.[]; type == "array") then add else . end;
+              type == "array" and
+              (changes | all(.[];
+                type == "object" and
+                (.vulnerabilities | type == "array") and
+                (.vulnerabilities | length == 0)))
+            ' >/dev/null; then
+              dependency_state=success
+            fi
+            unset dependency_payload
+            remote_tree="$(
+              GH_TOKEN="$READONLY_GITHUB_TOKEN" gh api \
+                "repos/$GITHUB_REPOSITORY/git/commits/$HEAD_SHA" --jq '.tree.sha'
+            )" || remote_tree=""
+            if [ -n "$SOURCE_TREE" ] && [ "$remote_tree" = "$SOURCE_TREE" ]; then
+              tree_state=success
+            fi
+            unset remote_tree
+          fi
+          unset READONLY_GITHUB_TOKEN
+          if [ "$HEAD_REPOSITORY" = "$BASE_REPOSITORY" ] \
+            && [ "$QUALITY_RESULT" = success ] \
+            && [ "$SOURCE_VERIFIED" = true ] \
+            && [ "$tree_state" = success ] \
+            && [ "$dependency_state" = success ]; then
+            quality_state=success
+          fi
+          GH_TOKEN="$installation_token" gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            --raw-field state="$intake_state" --raw-field context=intake \
+            --raw-field description="Trusted base-workflow origin gate"
+          GH_TOKEN="$installation_token" gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            --raw-field state="$quality_state" --raw-field context=quality \
+            --raw-field description="Isolated exact-head quality gate"
+          unset installation_token

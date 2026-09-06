@@ -1,0 +1,113 @@
+influxdb:
+  # HTTPS is required by default; trust private CAs in the system trust store.
+  # allow_insecure_http: true is ONLY for isolated disposable acceptance fixtures.
+  url: https://influxdb.example.invalid:8086
+  org: example-org
+  telemetry_bucket: solar_telemetry
+  tariff_bucket: solar_tariff
+  planning_bucket: solar_planning
+  tokens:
+    telemetry: ${INFLUX_TELEMETRY_TOKEN}
+    tariff: ${INFLUX_TARIFF_TOKEN}
+    forecast-plan: ${INFLUX_FORECAST_PLAN_TOKEN}
+    reconciliation: ${INFLUX_RECONCILIATION_TOKEN}
+    dashboard: ${INFLUX_DASHBOARD_TOKEN}
+
+http:
+  minimum_spacing_seconds: 0.5
+  # Decompressed provider JSON is rejected above this size (16 KiB-8 MiB).
+  max_response_bytes: 1048576
+  max_attempts: 3
+  retry_base_seconds: 1
+  retry_max_seconds: 30
+  # Longer provider Retry-After values defer future cycles instead of being shortened.
+  retry_after_max_seconds: 300
+  jitter_seconds: 0.5
+
+outbox:
+  # Each writer resolves this from its private service environment file.
+  state_directory: ${OUTBOX_STATE_DIRECTORY}
+  database_max_bytes: 134217728
+  max_record_bytes: 2097152
+  max_records: 100000
+  filesystem_min_free_bytes: 268435456
+  journal_headroom_bytes: 8388608
+  collection_reserve_bytes: 2097152
+  drain_max_records: 32
+  drain_max_bytes: 8388608
+  retry_base_seconds: 5
+  retry_max_seconds: 300
+
+observability:
+  # Each service resolves its own group-readable runtime directory.
+  status_directory: ${STATUS_DIRECTORY}
+  heartbeat_seconds: 30
+  stale_after_seconds: 90
+  syslog:
+    enabled: false
+    host: syslog.example.invalid
+    port: 6514
+    # tls verifies the server certificate and is recommended outside a trusted LAN.
+    transport: tls
+    connect_timeout_seconds: 3
+    queue_size: 256
+
+schedule:
+  telemetry_seconds: 300
+  telemetry_stale_after_seconds: 900
+  tariff_minutes: 360
+  forecast_hour: 21
+  forecast_minute: 30
+  reconciliation_hour: 0
+  reconciliation_minute: 15
+  worker_scan_seconds: 60
+  property_phase_seconds: 2
+  reconciliation_catch_up_days: 7
+
+properties:
+  - id: example-home
+    timezone: Europe/London
+    latitude: 51.5074
+    longitude: -0.1278
+
+    arrays:
+      - name: south-roof
+        panel_count: 10
+        panel_power_w: 440
+        tilt_degrees: 35
+        azimuth_degrees: 180
+        performance_ratio: 0.84
+
+    inverter:
+      adapter: sigenergy_cloud
+      rated_power_kw: 6.0
+      region: eu
+      app_key: ${SIGENERGY_HOME_APP_KEY}
+      app_secret: ${SIGENERGY_HOME_APP_SECRET}
+      system_id: ${SIGENERGY_HOME_SYSTEM_ID}
+
+    battery:
+      usable_capacity_kwh: 9.0
+      minimum_soc_percent: 10
+      maximum_soc_percent: 100
+      reserve_kwh: 1.0
+      max_charge_power_kw: 6.0
+      charge_efficiency: 0.94
+
+    forecast:
+      adapter: open_meteo
+      initial_correction_factor: 1.0
+      conservative_multiplier: 0.80
+
+    load:
+      # Daily load energy, distributed over the property's 23/24/25-hour local day.
+      # This legacy key is retained for compatibility; this is not a learned load model.
+      expected_kwh_until_next_cheap_window: 8.0
+
+    tariff:
+      adapter: octopus
+      # Illustrative only. Test the property's exact codes; bonus dispatches are not supported.
+      product_code: INTELLI-VAR-24-10-29
+      tariff_code: E-1R-INTELLI-VAR-24-10-29-B
+      cheap_rate_threshold_pence: 10.0
+      stale_after_minutes: 480

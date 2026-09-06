@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#081712">
+    <title>Solar plan</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">HOME ENERGY</p>
+          <h1>Solar plan</h1>
+        </div>
+        <div class="filters">
+          <a class="status-link" href="#system-status">System status</a>
+          <label>Property <select id="property"></select></label>
+          <label>Date <input id="day" type="date"></label>
+        </div>
+      </header>
+
+      <section class="summary" aria-label="Today's summary">
+        <article><span>Forecast</span><strong id="forecast-total">—</strong><small>kWh</small></article>
+        <article><span>Generated</span><strong id="actual-total">—</strong><small>kWh</small></article>
+        <article><span>Battery</span><strong id="battery-now">—</strong><small>%</small></article>
+        <article><span>Target</span><strong id="battery-target">—</strong><small>%</small></article>
+        <article><span>Overnight grid charge</span><strong id="grid-charge">—</strong><small>kWh</small></article>
+        <article><span>Est. cost</span><strong id="charge-cost">—</strong><small>p</small></article>
+      </section>
+
+      <section class="chart-card">
+        <div class="chart-title">
+          <div><p class="eyebrow">ONE DAY</p><h2>Generation & battery</h2></div>
+          <p id="status" role="status">Loading…</p>
+        </div>
+        <div class="legend">
+          <span class="forecast">Forecast solar</span><span class="actual">Actual solar</span>
+          <span class="planned-soc">Planned battery</span><span class="actual-soc">Actual battery</span>
+          <span class="cheap">Cheap rate</span>
+        </div>
+        <div class="canvas-wrap"><canvas id="curve" tabindex="0" aria-label="Solar generation and battery state chart" aria-describedby="inspection-help point-detail"></canvas></div>
+        <div class="axes" id="axes"></div>
+        <p class="note" id="inspection-help">Tap the chart to inspect a time, or focus it and use arrow keys, Home or End. The table includes the complete plan, beginning at the observed battery state.</p>
+        <p class="note" id="point-detail" aria-live="polite"></p>
+        <p class="note" id="freshness"></p>
+        <p class="note" id="energy-quality"></p>
+        <p class="note" id="shortfalls"></p>
+        <p class="note" id="assumption"></p>
+        <p class="note" id="factor"></p>
+        <details><summary>View chart data as a table</summary>
+          <div class="table-wrap"><table>
+            <caption>Generation and battery samples. Times use the property's timezone. Missing values are shown as —.</caption>
+            <thead><tr><th scope="col">Time</th><th scope="col">Forecast kW</th><th scope="col">Actual kW</th><th scope="col">Planned %</th><th scope="col">Battery %</th></tr></thead>
+            <tbody id="data-rows"></tbody>
+          </table></div>
+        </details>
+      </section>
+
+      <section class="chart-card status-card" id="system-status" aria-labelledby="system-status-title">
+        <div class="chart-title">
+          <div><p class="eyebrow">LIVE HEALTH</p><h2 id="system-status-title">System status</h2></div>
+          <p id="status-updated" role="status">Loading…</p>
+        </div>
+        <div class="process-grid" id="processes"></div>
+        <h3>Recent operational messages</h3>
+        <div class="log-list" id="log-messages" aria-live="polite"></div>
+        <p class="note">Status refreshes every 30 seconds. Queued fallback data is shown as pending and is not charted until InfluxDB confirms it.</p>
+      </section>
+    </main>
+  </body>
+</html>

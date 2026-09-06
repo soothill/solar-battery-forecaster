@@ -1,0 +1,37 @@
+[Unit]
+Description=Solar Battery Telemetry Worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=solar-telemetry
+Group=solar-telemetry
+SupplementaryGroups=solar-config
+WorkingDirectory=/opt/solar-battery-forecaster
+EnvironmentFile=/etc/solar-battery-forecaster/telemetry.env
+ExecStart=/opt/solar-battery-forecaster/.venv/bin/solar-battery-forecaster telemetry --config /etc/solar-battery-forecaster/config.yaml
+Restart=on-failure
+RestartSec=15
+StateDirectory=solar-battery-telemetry
+StateDirectoryMode=0700
+UMask=0077
+ReadWritePaths=/run/solar-battery-status/telemetry
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+MemoryMax=80M
+
+[Install]
+WantedBy=multi-user.target

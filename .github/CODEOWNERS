@@ -1,0 +1,8 @@
+# Bootstrap owner. Replace with separate teams before making code-owner review mandatory.
+* @soothill
+/.github/ @soothill
+/.agents/ @soothill
+/SECURITY.md @soothill
+/deployment/ @soothill
+/uv.lock @soothill
+

@@ -1,0 +1,12 @@
+[Unit]
+Description=Maintain one ephemeral Solar CI runner
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=2min
+RandomizedDelaySec=60sec
+AccuracySec=1sec
+Unit=solar-ci-runner.service
+
+[Install]
+WantedBy=timers.target
