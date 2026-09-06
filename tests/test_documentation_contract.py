@@ -1,6 +1,7 @@
 import configparser
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -150,6 +151,48 @@ def test_examples_use_placeholders_and_every_bash_block_has_context() -> None:
             f"code block lacks execution context: {index + 1}"
         )
 
+    bash_blocks = re.findall(r"```bash\n(.*?)\n```", guide, flags=re.DOTALL)
+    assert bash_blocks
+    assert all(block.splitlines()[0] == "set -euo pipefail" for block in bash_blocks)
+
+
+def test_bash_acceptance_prologue_fails_fast_and_propagates_pipeline_failure(
+    tmp_path: Path,
+) -> None:
+    guide = GUIDE.read_text(encoding="utf-8")
+    block = re.search(r"```bash\n(.*?)\n```", guide, flags=re.DOTALL)
+    assert block is not None
+    prologue = block.group(1).splitlines()[0]
+
+    after_command = tmp_path / "after-command"
+    command_result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"{prologue}\nfalse\nprintf reached > {shlex.quote(str(after_command))}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert command_result.returncode != 0
+    assert not after_command.exists()
+
+    after_pipeline = tmp_path / "after-pipeline"
+    pipeline_result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"{prologue}\nprintf ok | grep '^missing$' | tail -n 1\n"
+            f"printf reached > {shlex.quote(str(after_pipeline))}",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert pipeline_result.returncode != 0
+    assert not after_pipeline.exists()
+
 
 def test_documentation_never_shell_sources_service_environment_files() -> None:
     markdown = "\n".join(
@@ -296,7 +339,9 @@ def test_live_acceptance_is_scoped_and_has_exact_expected_results() -> None:
         "MemoryCurrent",
         "MemoryMax",
         "NRestarts=0",
-        "Stopping/killing each service",
+        "systemctl kill --kill-whom=main --signal=SIGKILL",
+        "for attempt in {1..50}",
+        'test "$after" -gt "$before"',
         "http://127.0.0.1:9",
         "does **not** stop, firewall, or reconfigure the shared InfluxDB server",
         "delivered 1 record(s)",
@@ -307,5 +352,28 @@ def test_live_acceptance_is_scoped_and_has_exact_expected_results() -> None:
         "does not support mutual TLS (mTLS)",
         "unverified minimum baseline",
         "live-tested/recommended baseline",
+        "permission checks themselves are silent",
+        "one sanitized status JSON object per writer",
     ]:
         assert required in prose
+
+
+def test_outage_acceptance_selects_exactly_one_property_without_mutating_main_config() -> None:
+    guide = GUIDE.read_text(encoding="utf-8")
+
+    for required in [
+        "property_alias=home-01",
+        'config = yaml.safe_load(source.read_text(encoding="utf-8"))',
+        'if len(matches) != 1:',
+        'config["properties"] = matches',
+        'config["influxdb"]["url"] = "http://127.0.0.1:9"',
+        "os.O_EXCL | os.O_NOFOLLOW",
+        "os.fchown(descriptor, 0, grp.getgrnam(\"solar-config\").gr_gid)",
+        "os.fchmod(descriptor, 0o640)",
+        "trap cleanup_acceptance_config EXIT",
+        "pending records increased from zero to one",
+        "increased by exactly one",
+    ]:
+        assert required in guide
+    assert "cp --preserve=mode,ownership /etc/solar-battery-forecaster/config.yaml" not in guide
+    assert "sed -i" not in guide

@@ -158,6 +158,7 @@ server version; confirm that its JSON `version` value starts with `2.` before cr
 **Run on an administrator workstation with the Influx CLI configured; the first command is client-only and the second queries the server:**
 
 ```bash
+set -euo pipefail
 influx version
 curl --fail --silent --show-error https://influxdb.example.invalid:8086/health
 ```
@@ -174,12 +175,14 @@ administrator CLI; do not paste an ID into a name field or infer an ID from a na
 **Run on the InfluxDB administrator workstation; replace the organization name, then record the returned organization ID:**
 
 ```bash
+set -euo pipefail
 influx org list --name ORG_NAME
 ```
 
 **Run on the InfluxDB administrator workstation; replace every uppercase ID/duration placeholder first:**
 
 ```bash
+set -euo pipefail
 influx bucket create --org-id ORG_ID --name solar_telemetry --retention RETENTION_DURATION
 influx bucket create --org-id ORG_ID --name solar_tariff --retention RETENTION_DURATION
 influx bucket create --org-id ORG_ID --name solar_planning --retention RETENTION_DURATION
@@ -205,6 +208,7 @@ service environment.
 **Run on the private InfluxDB administrator workstation; replace IDs before each command and store each returned token immediately:**
 
 ```bash
+set -euo pipefail
 influx auth create --org-id ORG_ID --description solar-telemetry \
   --write-bucket TELEMETRY_BUCKET_ID
 influx auth create --org-id ORG_ID --description solar-tariff \
@@ -251,6 +255,7 @@ equivalent command-line management operations.
 **Run inside the new LXC as root:**
 
 ```bash
+set -euo pipefail
 apt-get update
 apt-get upgrade
 apt-get install ca-certificates curl python3 python3-venv util-linux
@@ -469,6 +474,7 @@ code. They are not enabled at boot.
 **Run inside the LXC as root:**
 
 ```bash
+set -euo pipefail
 for scope in telemetry tariff forecast-plan reconciliation dashboard; do
   systemctl start "solar-battery-validate@$scope.service"
   systemctl show "solar-battery-validate@$scope.service" \
@@ -486,6 +492,7 @@ unit first so two processes never operate on the same outbox.
 **Run inside the LXC as root during the acceptance window:**
 
 ```bash
+set -euo pipefail
 systemctl stop solar-battery-telemetry solar-battery-tariff
 systemctl start solar-battery-once@telemetry.service
 systemctl start solar-battery-once@tariff.service
@@ -507,6 +514,7 @@ Enable all five independent services only after the one-shot checks succeed.
 **Run inside the LXC as root:**
 
 ```bash
+set -euo pipefail
 systemctl enable --now solar-battery-telemetry
 systemctl enable --now solar-battery-tariff
 systemctl enable --now solar-battery-forecast-plan
@@ -527,6 +535,7 @@ briefly during activation, so repeat after the process is active.
 **Run inside the LXC as root:**
 
 ```bash
+set -euo pipefail
 for unit in telemetry tariff forecast-plan reconciliation dashboard; do
   service="solar-battery-$unit.service"
   systemctl is-enabled --quiet "$service"
@@ -546,6 +555,7 @@ active. This tests failure isolation; it does not simulate a crash or alter prov
 **Run inside the LXC as root:**
 
 ```bash
+set -euo pipefail
 for target in telemetry tariff forecast-plan reconciliation dashboard; do
   systemctl stop "solar-battery-$target.service"
   test "$(systemctl is-active "solar-battery-$target.service")" = inactive
@@ -561,15 +571,53 @@ done
 
 The block must exit zero; all five services must end active.
 
+In an explicitly authorized interruption window, prove `Restart=on-failure` with one controlled
+SIGKILL. The example targets telemetry; it records the counter first, checks every peer immediately
+after the signal, and polls for at most 25 seconds (the unit has a 15-second restart delay). No
+provider, database, network or peer service is deliberately disrupted.
+
+**Run inside the LXC as root during an authorized automatic-restart test:**
+
+```bash
+set -euo pipefail
+target=telemetry
+service="solar-battery-$target.service"
+before="$(systemctl show "$service" --property=NRestarts --value)"
+systemctl is-active --quiet "$service"
+systemctl kill --kill-whom=main --signal=SIGKILL "$service"
+for peer in tariff forecast-plan reconciliation dashboard; do
+  systemctl is-active --quiet "solar-battery-$peer.service"
+done
+recovered=false
+for attempt in {1..50}; do
+  after="$(systemctl show "$service" --property=NRestarts --value)"
+  if systemctl is-active --quiet "$service" && test "$after" -gt "$before"; then
+    recovered=true
+    break
+  fi
+  sleep 0.5
+done
+test "$recovered" = true
+for peer in tariff forecast-plan reconciliation dashboard; do
+  systemctl is-active --quiet "solar-battery-$peer.service"
+done
+```
+
+The block must exit zero: telemetry is active again, its `NRestarts` value is greater than the
+captured value, and all four peers remained active. Record the before/after counters. A failure or
+timeout is a production blocker; inspect the local journal before continuing.
+
 ### Outbox permissions and healthy baseline
 
 Stop one writer before using its outbox maintenance unit. Repeat for all four writers. The
-permissions block must print nothing and exit zero; each status JSON must show zero pending,
-blocked and quarantined records before the controlled outage test.
+permission checks themselves are silent and the block must exit zero. It then deliberately prints
+one sanitized status JSON object per writer; each object must show zero pending, blocked and
+quarantined records before the controlled outage test.
 
 **Run inside the LXC as root:**
 
 ```bash
+set -euo pipefail
 for worker in telemetry tariff forecast-plan reconciliation; do
   systemctl stop "solar-battery-$worker.service"
   state="/var/lib/solar-battery-$worker"
@@ -586,13 +634,16 @@ done
 
 Run this only in an authorized acceptance window. It does **not** stop, firewall, or reconfigure the
 shared InfluxDB server. It stops only this deployment's telemetry worker and gives a non-enabled
-one-shot unit a temporary private configuration whose Influx URL is the local discard port. Start
-only with a healthy telemetry outbox showing zero pending records. Record a narrow UTC test window
-and the count of distinct telemetry timestamps in it using an authorized Influx administrator CLI.
+one-shot unit a temporary private configuration whose Influx URL is the local discard port and
+whose property list contains exactly one explicitly selected non-identifying alias. The main
+configuration is read but never modified. Start only with a healthy telemetry outbox showing zero
+pending records. Record a narrow UTC test window and the count of distinct telemetry timestamps in
+it using an authorized Influx administrator CLI.
 
 **Run on the InfluxDB administrator workstation; replace the organization, property alias, and absolute UTC window:**
 
 ```bash
+set -euo pipefail
 influx query --org ORG_NAME '
 from(bucket: "solar_telemetry")
   |> range(start: TEST_START_UTC, stop: TEST_STOP_UTC)
@@ -602,19 +653,56 @@ from(bucket: "solar_telemetry")
   |> count(column: "_time")'
 ```
 
-Record the baseline count, then create a root-owned copy of the configuration and change only its
-Influx URL to an unreachable loopback port. The `grep` output must be exactly
-`url: http://127.0.0.1:9`; it contains no credential.
+Record the baseline count, then use the installed virtual environment's PyYAML parser to select
+exactly one property and create a new root-owned temporary file with an unreachable Influx URL.
+The quoted Python here-document does not evaluate the YAML or environment placeholders as shell
+code. Replace `home-01` with the same non-identifying alias used in the query. The final output must
+be `selected property home-01; Influx URL http://127.0.0.1:9` (with the chosen alias) followed by
+`root:solar-config 640`.
 
 **Run inside the LXC as root:**
 
 ```bash
+set -euo pipefail
+property_alias=home-01
 systemctl stop solar-battery-telemetry.service
-cp --preserve=mode,ownership /etc/solar-battery-forecaster/config.yaml \
-  /etc/solar-battery-forecaster/acceptance-outage.yaml
-sed -i '0,/^  url: /s#^  url: .*#  url: http://127.0.0.1:9#' \
-  /etc/solar-battery-forecaster/acceptance-outage.yaml
-grep '^  url: ' /etc/solar-battery-forecaster/acceptance-outage.yaml
+/opt/solar-battery-forecaster/.venv/bin/python - "$property_alias" <<'PY'
+import grp
+import os
+import sys
+from pathlib import Path
+
+import yaml
+
+source = Path("/etc/solar-battery-forecaster/config.yaml")
+destination = Path("/etc/solar-battery-forecaster/acceptance-outage.yaml")
+alias = sys.argv[1]
+config = yaml.safe_load(source.read_text(encoding="utf-8"))
+matches = [item for item in config["properties"] if item.get("id") == alias]
+if len(matches) != 1:
+    raise SystemExit("selected property alias must match exactly once")
+config["properties"] = matches
+config["influxdb"]["url"] = "http://127.0.0.1:9"
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+descriptor = os.open(destination, flags, 0o640)
+os.fchown(descriptor, 0, grp.getgrnam("solar-config").gr_gid)
+os.fchmod(descriptor, 0o640)
+with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+    yaml.safe_dump(config, output, sort_keys=False)
+written = yaml.safe_load(destination.read_text(encoding="utf-8"))
+if len(written["properties"]) != 1 or written["properties"][0]["id"] != alias:
+    raise SystemExit("temporary configuration property selection failed")
+if written["influxdb"]["url"] != "http://127.0.0.1:9":
+    raise SystemExit("temporary configuration Influx URL is not isolated")
+print(f"selected property {alias}; Influx URL {written['influxdb']['url']}")
+PY
+cleanup_acceptance_config() {
+  rm -- /etc/solar-battery-forecaster/acceptance-outage.yaml
+}
+trap cleanup_acceptance_config EXIT
+test "$(stat -c '%U:%G %a' /etc/solar-battery-forecaster/acceptance-outage.yaml)" = \
+  'root:solar-config 640'
+stat -c '%U:%G %a' /etc/solar-battery-forecaster/acceptance-outage.yaml
 if systemctl start solar-battery-outage-test@telemetry.service; then
   echo 'unexpected direct-write success' >&2
   exit 1
@@ -626,16 +714,17 @@ journalctl -u solar-battery-outbox-status@telemetry.service -o cat --no-pager \
   | grep '^{' | tail -n 1
 ```
 
-The outage unit must report `Result=exit-code` and `ExecMainStatus=1`: provider collection succeeded
-but the intentionally unreachable Influx destination left one undelivered record. Status must show
-pending records increased from zero to one, with no quarantine or blocked stream. Securely remove
-the exact temporary file, drain using the real configuration while the continuous writer remains
-stopped, and check the empty status.
+The outage unit must report `Result=exit-code` and `ExecMainStatus=1`: the selected property's
+provider collection succeeded but the intentionally unreachable Influx destination left one
+undelivered record. Because the temporary YAML contains exactly one property, status must show
+pending records increased from zero to one, with no quarantine or blocked stream. The block's EXIT
+trap securely removes the exact temporary file on success or error. Drain using the real
+configuration while the continuous writer remains stopped, and check the empty status.
 
 **Run inside the LXC as root:**
 
 ```bash
-rm -- /etc/solar-battery-forecaster/acceptance-outage.yaml
+set -euo pipefail
 systemctl reset-failed solar-battery-outage-test@telemetry.service
 systemctl start solar-battery-outbox-drain@telemetry.service
 journalctl -u solar-battery-outbox-drain@telemetry.service -o cat --no-pager \
@@ -659,6 +748,7 @@ heartbeats, and a last cycle result for each process after one normal cycle.
 **Run inside the LXC as root after all services have completed a cycle:**
 
 ```bash
+set -euo pipefail
 curl --fail --silent http://127.0.0.1:8088/api/status | python3 -c '
 import datetime, json, sys
 payload = json.load(sys.stdin)
@@ -694,6 +784,7 @@ LAN/VPN firewall rules are in place.
 **Run inside the LXC as root:**
 
 ```bash
+set -euo pipefail
 apt-get install nginx apache2-utils
 htpasswd -c /etc/nginx/solar-dashboard.htpasswd DASHBOARD_USERNAME
 chown root:www-data /etc/nginx/solar-dashboard.htpasswd
@@ -729,6 +820,7 @@ server {
 **Run inside the LXC as root after saving the Nginx configuration:**
 
 ```bash
+set -euo pipefail
 ln -s /etc/nginx/sites-available/solar-dashboard /etc/nginx/sites-enabled/solar-dashboard
 nginx -t
 systemctl enable --now nginx
@@ -740,6 +832,7 @@ must succeed with HTTP 200, and the third must validate the certificate without 
 **Run on a trusted LAN/VPN client; replace the DNS name and username:**
 
 ```bash
+set -euo pipefail
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
   https://DASHBOARD_DNS_NAME/)" = 401
 test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
@@ -764,10 +857,14 @@ Record evidence without secrets, addresses, coordinates, account identifiers, pa
 - [ ] Tariff one-shot returns only valid intervals of at most two hours and confirmed records appear.
 - [ ] A due forecast creates one complete snapshot and a recommendation; reconciliation later
   creates the daily actual-versus-forecast factor.
-- [ ] Stopping/killing each service in turn leaves the other four running.
-- [ ] During an authorized Influx outage, a failed direct write creates a private SQLite pending
-  record; after recovery it drains and the confirmed Influx point appears once.
-- [ ] Outbox state, WAL/SHM permissions, disk reserve and alerts have been checked.
+- [ ] Cleanly stopping/starting each service in turn leaves the other four running.
+- [ ] During the authorized SIGKILL test, the selected service automatically returns active, its
+  `NRestarts` counter increases, and every peer remains active.
+- [ ] During an authorized, one-selected-property Influx outage exercise, a failed direct write
+  creates exactly one private SQLite pending record; after recovery it drains and the distinct
+  confirmed Influx timestamp count increases by exactly one.
+- [ ] Outbox state, WAL/SHM permissions, disk reserve and alerts have been checked; permission
+  checks are silent and the expected sanitized status JSON was reviewed separately.
 - [ ] Dashboard direct loopback access is not exposed; HTTPS proxy returns unauthenticated 401,
   authenticated 200, and a valid trusted certificate.
 - [ ] Dashboard reports all five heartbeats and confirmed-delivery freshness.
@@ -810,6 +907,7 @@ arbitrary log text.
 **Run inside the LXC as an authorized operator:**
 
 ```bash
+set -euo pipefail
 systemctl --no-pager --full status solar-battery-telemetry
 journalctl -u solar-battery-telemetry --since today --no-pager
 ```

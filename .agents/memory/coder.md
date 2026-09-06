@@ -74,3 +74,7 @@
   shell. Administrative validation, one-shot collection and outbox checks use non-enabled,
   root-owned systemd templates with `EnvironmentFile=` and direct `ExecStart`; contract tests bind
   those exact CLI arguments and prevent documentation from reintroducing shell sourcing.
+- 2026-09-06: Executable acceptance blocks run Bash with `set -euo pipefail`, including pipelines
+  whose missing match must fail. Outage acceptance uses a safely parsed, one-property temporary
+  YAML so one provider collection maps to one pending record, one drain and one new timestamp;
+  automatic restart evidence separately requires a bounded SIGKILL test and increased `NRestarts`.
