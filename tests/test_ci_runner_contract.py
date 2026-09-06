@@ -154,6 +154,15 @@ def test_toolchain_manifest_is_exact_and_build_reverifies_artifacts() -> None:
     assert "uv sync --directory /tmp/project --frozen --all-extras" in dockerfile
     assert "UV_PROJECT_ENVIRONMENT=/opt/ci-tools/venv" in dockerfile
     assert "/opt/ci-tools/bin/gitleaks" in dockerfile
+    assert ("install -m 0555 /opt/actions-runner/externals/node24/bin/node "
+            "/opt/ci-tools/bin/node") in dockerfile
+    assert "ln -s /opt/ci-tools/bin/node /usr/local/bin/node" in dockerfile
+    assert "/opt/ci-tools/bin/node --version" in dockerfile
+    assert dockerfile.index('sha256sum --check --strict') < dockerfile.index(
+        "install -m 0555 /opt/actions-runner/externals/node24/bin/node")
+    workflow = Path(".github/workflows/trusted-ci.yml").read_text(encoding="utf-8")
+    assert 'SOLAR_REQUIRE_BROWSER_TESTS: "1"' in workflow
+    assert workflow.index("/opt/ci-tools/bin/node --version") < workflow.index("pytest")
     assert "/opt/ci-tools/gitleaks.toml" in dockerfile
     assert "chmod -R a-w /opt/ci-tools" in dockerfile
     build = (RUNNER / "build-images.sh").read_text(encoding="utf-8")

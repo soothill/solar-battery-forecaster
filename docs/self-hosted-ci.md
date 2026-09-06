@@ -38,6 +38,17 @@ drops all capabilities, uses `no-new-privileges`, the Docker default seccomp pol
 gitleaks, the locked project toolchain, and the Actions runner into the image; CI itself uses only
 the full-SHA-pinned checkout action and local commands.
 
+The offline dashboard behavior harness requires Node.js in CI. The image copies
+`externals/node24/bin/node` from the checksum-verified Actions runner archive into
+root-owned, read-only `/opt/ci-tools/bin/node` and exposes it on PATH. The pinned runner's
+[packaging source](https://github.com/actions/runner/blob/v2.337.0/src/Misc/externals.sh)
+defines that Linux layout. No separate runtime download or new CI job is required.
+Image construction and the trusted quality job both check the executable; a missing
+Node runtime fails CI rather than skipping browser behavior. Local contributors should
+install Node to run `node tests/dashboard_browser.cjs`; without it, pytest reports an
+explicit optional local skip. Set `SOLAR_REQUIRE_BROWSER_TESTS=1` to require the gate
+locally as CI does.
+
 The baked toolchain includes a populated, read-only uv cache seed. Each runner copies it into a
 bounded disposable tmpfs cache before forcing offline frozen syncs. A dependency/lock change fails
 until a maintainer reviews its artifacts and rebuilds the runner image in staging. Pip-audit audits

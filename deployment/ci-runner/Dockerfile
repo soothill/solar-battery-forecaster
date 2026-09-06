@@ -29,6 +29,9 @@ RUN echo "$ACTIONS_RUNNER_SHA256  /tmp/actions-runner.tar.gz" | sha256sum --chec
     && echo "$PYTHON312_SHA256  /tmp/python312.tar.gz" | sha256sum --check --strict \
     && mkdir -p /opt/actions-runner /opt/ci-tools/bin /opt/python/3.11 /opt/python/3.12 /tmp/uv /tmp/gh /tmp/gitleaks \
     && tar -xzf /tmp/actions-runner.tar.gz -C /opt/actions-runner \
+    && install -m 0555 /opt/actions-runner/externals/node24/bin/node /opt/ci-tools/bin/node \
+    && ln -s /opt/ci-tools/bin/node /usr/local/bin/node \
+    && /opt/ci-tools/bin/node --version \
     && tar -xzf /tmp/uv.tar.gz -C /tmp/uv \
     && tar -xzf /tmp/gh.tar.gz -C /tmp/gh \
     && tar -xzf /tmp/gitleaks.tar.gz -C /tmp/gitleaks \
