@@ -1,7 +1,10 @@
 # Coder memory
 
-- 2026-09-05: Python 3.11+, Pydantic configuration, HTTPX adapters, APScheduler, InfluxDB v2 client.
-- 2026-09-05: Config and environment files containing real credentials are gitignored.
+- 2026-09-06: Python 3.11+, Pydantic configuration, HTTPX adapters, asyncio worker loops with
+  monotonic start-to-start deadlines, and the InfluxDB v2 client.
+- 2026-09-06: Local config.yaml and environment files matching .env, .env.* and *.env
+  are ignored; safe example templates remain tracked. Ignore rules do not detect arbitrary
+  filenames containing secrets or remove credentials that are already tracked.
 - 2026-09-05: Dependencies are locked in `uv.lock`; CI uses frozen installs.
 - 2026-09-05: Forecast writes use issued-time snapshot tags; readers accept only a complete
   local-day snapshot so interrupted retries cannot mix forecast vintages.
@@ -81,3 +84,8 @@
   that cleans up and restores only an originally active worker across normal exits and catchable
   signals. Automatic restart evidence separately requires a bounded SIGKILL test and increased
   `NRestarts`.
+- 2026-09-06: Production recommendations persist one UTC interval trajectory with exact
+  property/day/decision/snapshot identity; primary overnight charge and full-horizon charge are
+  separate. Dashboard and calibration share counter-reset, gap, boundary and coverage checks.
+  Meaningful acceptance includes both DST transitions, real Influx forecast/plan roundtrips,
+  bounded-backlog restart/replay under the deployed memory ceiling, and browser request races.

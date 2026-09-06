@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 from pathlib import Path
 
@@ -107,6 +108,10 @@ async def _run(args: argparse.Namespace) -> int:
         [item.id for item in config.properties],
     )
     operation: Operation | None = None
+    loop = asyncio.get_running_loop()
+    stopping = asyncio.Event()
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+    signal_installed = False
     try:
         operation = WORKERS[args.command](config)
         if hasattr(operation, "reporter"):
@@ -121,12 +126,21 @@ async def _run(args: argparse.Namespace) -> int:
             )
             return 0 if cycle_succeeded and not undelivered else 1
         else:
-            await operation.run_forever(worker_interval(config, args.command))
+            # Finish the current cycle so a synchronous write is not closed underneath
+            # its executor thread. Stop promptly when waiting for the next deadline.
+            loop.add_signal_handler(signal.SIGTERM, stopping.set)
+            signal_installed = True
+            await operation.run_forever(worker_interval(config, args.command), stopping)
         return 0
     finally:
-        if operation is not None:
-            await operation.close()
-        close_reporter(reporter)
+        try:
+            if operation is not None:
+                await operation.close()
+        finally:
+            close_reporter(reporter)
+            if signal_installed:
+                loop.remove_signal_handler(signal.SIGTERM)
+                signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 def main() -> None:

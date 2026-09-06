@@ -6,14 +6,14 @@ import os
 import shutil
 import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from solar_battery_forecaster.config import OutboxConfig
-from solar_battery_forecaster.models import ForecastSnapshot
+from solar_battery_forecaster.models import ForecastInterval, ForecastSnapshot
 
 SCHEMA_VERSION = 1
 EVENT_DOMAIN = b"solar-battery-forecaster:influx-outbox:v1\0"
@@ -253,8 +253,8 @@ class DurableOutbox:
     def admit_collection(
         self, property_id: str | None = None, reserve_bytes: int | None = None
     ) -> None:
-        reserve = reserve_bytes or self.config.collection_reserve_bytes
-        if reserve <= 0 or reserve > self.config.max_record_bytes:
+        reserve = self.config.collection_reserve_bytes if reserve_bytes is None else reserve_bytes
+        if reserve <= 0:
             raise OutboxFullError("outbox record reserve is invalid")
         status = self.status()
         if status.pending_records + status.quarantined_records >= self.config.max_records:
@@ -310,7 +310,11 @@ class DurableOutbox:
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
-        event_id = hashlib.sha256(EVENT_DOMAIN + identity + b"\0" + payload).hexdigest()
+        event_hash = hashlib.sha256(EVENT_DOMAIN)
+        event_hash.update(identity)
+        event_hash.update(b"\0")
+        event_hash.update(payload)
+        event_id = event_hash.hexdigest()
         if self.connection.execute("SELECT 1 FROM queue WHERE event_id=?", (event_id,)).fetchone():
             return event_id
         self.admit_collection(property_id, len(payload))
@@ -432,16 +436,37 @@ class DurableOutbox:
         self._set_meta("last_failure_class", failure_class)
         self._set_meta("last_failure_at", datetime.now(UTC).isoformat())
 
-    def _heads(self) -> list[sqlite3.Row]:
-        return list(
-            self.connection.execute(
-                """SELECT q.* FROM queue q JOIN streams s USING(stream_key)
+    def _next_head(self, last_stream: str) -> sqlite3.Row | None:
+        # Choose one stream using narrow columns; fetch only its oldest payload.
+        for lower_bound in (last_stream, None):
+            row = self.connection.execute(
+                """SELECT q.seq FROM queue q JOIN streams s USING(stream_key)
                 WHERE s.state='ready' AND NOT EXISTS (
                   SELECT 1 FROM queue older
                   WHERE older.stream_key=q.stream_key AND older.seq < q.seq)
-                ORDER BY q.stream_key"""
-            )
-        )
+                AND (? IS NULL OR q.stream_key > ?)
+                ORDER BY q.stream_key LIMIT 1""", (lower_bound, lower_bound),
+            ).fetchone()
+            if row is not None:
+                return self.connection.execute(
+                    "SELECT * FROM queue WHERE seq=?", (row["seq"],)
+                ).fetchone()
+        return None
+
+    def _queue_rows(self, where: str = "1", parameters: tuple = ()) -> Iterator[sqlite3.Row]:
+        # A one-row keyset batch bounds memory even when max_record_bytes is 16 MiB.
+        # Finishing each cursor before quarantine avoids mutation during a live scan.
+        seq = 0
+        while True:
+            row = self.connection.execute(
+                f"SELECT * FROM queue WHERE seq > ? AND ({where}) ORDER BY seq LIMIT 1",
+                (seq, *parameters),
+            ).fetchone()
+            if row is None:
+                return
+            seq = int(row["seq"])
+            yield row
+            del row
 
     def drain(self, deliver: Callable[[str, str, str], None], force: bool = False) -> int:
         if self._meta("delivery_paused") == "1":
@@ -452,12 +477,9 @@ class DurableOutbox:
         delivered_bytes = 0
         last_stream = self._meta("last_stream")
         while delivered < self.config.drain_max_records:
-            heads = self._heads()
-            if not heads:
+            row = self._next_head(last_stream)
+            if row is None:
                 break
-            ordered = [row for row in heads if row["stream_key"] > last_stream]
-            ordered.extend(row for row in heads if row["stream_key"] <= last_stream)
-            row = ordered[0]
             payload = bytes(row["payload"])
             if delivered and delivered_bytes + len(payload) > self.config.drain_max_bytes:
                 break
@@ -520,12 +542,9 @@ class DurableOutbox:
     def pending_forecasts(
         self, property_id: str, provider: str, start: datetime, stop: datetime
     ) -> list[ForecastSnapshot]:
-        rows = list(
-            self.connection.execute(
-                """SELECT * FROM queue
-            WHERE property_id=? AND logical_kind='forecast_snapshot'""",
-                (property_id,),
-            )
+        rows = self._queue_rows(
+            "property_id=? AND logical_kind='forecast_snapshot'",
+            (property_id,),
         )
         result: list[ForecastSnapshot] = []
         for row in rows:
@@ -537,6 +556,9 @@ class DurableOutbox:
                 metadata.get("provider") != provider
                 or metadata.get("forecast_start") != start.astimezone(UTC).isoformat()
                 or metadata.get("forecast_stop") != stop.astimezone(UTC).isoformat()
+                or metadata.get("point_count") != int(
+                    (stop.astimezone(UTC) - start.astimezone(UTC)).total_seconds() / 3600
+                )
             ):
                 continue
             result.append(
@@ -547,8 +569,23 @@ class DurableOutbox:
                     point_count=int(metadata["point_count"]),
                     raw_energy_kwh=float(metadata["raw_energy_kwh"]),
                     correction_factor=float(metadata["correction_factor"]),
+                    intervals=tuple(
+                        ForecastInterval(
+                            start=datetime.fromisoformat(item["start"]),
+                            end=datetime.fromisoformat(item["end"]),
+                            energy_kwh=float(item["energy_kwh"]),
+                            power_kw=float(item["power_kw"]),
+                            issued_at=datetime.fromisoformat(item["issued_at"]),
+                            provider=str(item["provider"]),
+                            corrected_energy_kwh=item.get("corrected_energy_kwh"),
+                            conservative_energy_kwh=item.get("conservative_energy_kwh"),
+                        )
+                        for item in metadata.get("intervals", [])
+                    ),
                 )
             )
+            # Consumers choose the newest snapshot; do not accumulate all vintages.
+            result = [max(result, key=lambda item: (item.issued_at, item.snapshot_id))]
         return result
 
     def verify(self) -> int:
@@ -556,8 +593,7 @@ class DurableOutbox:
         if result != "ok":
             raise OutboxCorruptionError("outbox database quick_check failed")
         quarantined = 0
-        rows = list(self.connection.execute("SELECT * FROM queue"))
-        for row in rows:
+        for row in self._queue_rows():
             if not self._row_checksums_valid(row):
                 self._quarantine(row, "checksum_mismatch")
                 quarantined += 1
@@ -588,9 +624,11 @@ class DurableOutbox:
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
-        event_valid = (
-            hashlib.sha256(EVENT_DOMAIN + identity + b"\0" + payload).hexdigest() == row["event_id"]
-        )
+        event_hash = hashlib.sha256(EVENT_DOMAIN)
+        event_hash.update(identity)
+        event_hash.update(b"\0")
+        event_hash.update(payload)
+        event_valid = event_hash.hexdigest() == row["event_id"]
         return payload_valid and metadata_valid and event_valid
 
     def retry(self, stream_key: str | None = None) -> int:

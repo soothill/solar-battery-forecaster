@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal, TypeAlias
@@ -8,6 +9,7 @@ from typing import Literal, TypeAlias
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 
+from solar_battery_forecaster.actual_energy import evaluate_actual_energy
 from solar_battery_forecaster.config import InfluxConfig, OutboxConfig
 from solar_battery_forecaster.models import (
     BatteryDecision,
@@ -18,7 +20,7 @@ from solar_battery_forecaster.models import (
     Telemetry,
     forecast_snapshot_id,
 )
-from solar_battery_forecaster.outbox import DurableOutbox, OutboxStatus
+from solar_battery_forecaster.outbox import DurableOutbox, OutboxFullError, OutboxStatus
 
 LOGGER = logging.getLogger(__name__)
 DeliveryDisposition: TypeAlias = Literal["direct", "buffered", "ignored"]
@@ -70,6 +72,8 @@ class InfluxStore:
         if self.outbox is None:
             raise RuntimeError("InfluxDB writes require a durable outbox")
         payload = "\n".join(point.to_line_protocol() for point in records).encode("utf-8")
+        if not payload or len(payload) > self.outbox.config.max_record_bytes:
+            raise OutboxFullError("outbox record reserve is invalid")
         self.outbox.admit_collection(property_id, len(payload))
         enqueue_arguments = {
             "property_id": property_id,
@@ -152,10 +156,22 @@ class InfluxStore:
         intervals: list[ForecastInterval],
         correction_factor: float,
         conservative_multiplier: float,
+        *,
+        forecast_day_start: datetime | None = None,
+        forecast_day_stop: datetime | None = None,
+        inverter_limit_kw: float | None = None,
     ) -> DeliveryDisposition:
         points = []
+        corrected_by_start: dict[datetime, float] = {}
         for interval in intervals:
-            corrected = interval.energy_kwh * correction_factor
+            duration = (
+                interval.end.astimezone(UTC) - interval.start.astimezone(UTC)
+            ).total_seconds() / 3600
+            corrected = min(
+                interval.energy_kwh * correction_factor,
+                inverter_limit_kw * duration if inverter_limit_kw else float("inf"),
+            )
+            corrected_by_start[interval.start] = corrected
             snapshot_id = forecast_snapshot_id(interval.issued_at)
             points.append(
                 Point("pv_forecast")
@@ -167,10 +183,10 @@ class InfluxStore:
                 .field("corrected_energy_kwh", corrected)
                 .field("conservative_energy_kwh", corrected * conservative_multiplier)
                 .field("raw_power_kw", interval.power_kw)
-                .field("corrected_power_kw", interval.power_kw * correction_factor)
+                .field("corrected_power_kw", corrected / duration)
                 .field(
                     "conservative_power_kw",
-                    interval.power_kw * correction_factor * conservative_multiplier,
+                    corrected / duration * conservative_multiplier,
                 )
                 .field("correction_factor", correction_factor)
                 .field(
@@ -182,24 +198,41 @@ class InfluxStore:
             )
         if not intervals:
             return "ignored"
+        day_start = forecast_day_start or intervals[0].start
+        day_stop = forecast_day_stop or intervals[-1].end
+        day_intervals = [item for item in intervals if day_start <= item.start < day_stop]
         snapshot_id = forecast_snapshot_id(intervals[0].issued_at)
         return self._write(
             self.config.planning_bucket,
             points,
             property_id=property_id,
             logical_kind="forecast_snapshot",
-            logical_key=f"{property_id}:{intervals[0].provider}:{intervals[0].start.date()}:{snapshot_id}",
+            logical_key=f"{property_id}:{intervals[0].provider}:{day_start.date()}:{snapshot_id}",
             min_timestamp=intervals[0].start,
             max_timestamp=intervals[-1].end,
             metadata={
                 "provider": intervals[0].provider,
                 "snapshot_id": snapshot_id,
                 "issued_at": intervals[0].issued_at.astimezone(UTC).isoformat(),
-                "point_count": len(intervals),
-                "raw_energy_kwh": sum(item.energy_kwh for item in intervals),
+                "point_count": len(day_intervals),
+                "raw_energy_kwh": sum(item.energy_kwh for item in day_intervals),
                 "correction_factor": correction_factor,
-                "forecast_start": intervals[0].start.astimezone(UTC).isoformat(),
-                "forecast_stop": intervals[-1].end.astimezone(UTC).isoformat(),
+                "forecast_start": day_start.astimezone(UTC).isoformat(),
+                "forecast_stop": day_stop.astimezone(UTC).isoformat(),
+                "intervals": [
+                    {
+                        "start": item.start.astimezone(UTC).isoformat(),
+                        "end": item.end.astimezone(UTC).isoformat(),
+                        "energy_kwh": item.energy_kwh,
+                        "power_kw": item.power_kw,
+                        "issued_at": item.issued_at.astimezone(UTC).isoformat(),
+                        "provider": item.provider,
+                        "corrected_energy_kwh": corrected_by_start[item.start],
+                        "conservative_energy_kwh": corrected_by_start[item.start]
+                        * conservative_multiplier,
+                    }
+                    for item in intervals
+                ],
             },
         )
 
@@ -293,14 +326,62 @@ class InfluxStore:
             point = point.field("cheap_rate_average_pence", item.cheap_rate_average_pence)
         if item.estimated_charge_cost_pence is not None:
             point = point.field("estimated_charge_cost_pence", item.estimated_charge_cost_pence)
+        points = [point]
+        if item.plan_version:
+            # Zero-energy plans must not introduce integer field types into series
+            # whose nonzero energy is represented as a float by InfluxDB.
+            for name in (
+                "current_soc_percent",
+                "target_soc_percent",
+                "grid_charge_kwh",
+                "raw_solar_kwh",
+                "corrected_solar_kwh",
+                "conservative_solar_kwh",
+                "expected_load_kwh",
+                "reserve_kwh",
+                "correction_factor",
+                "tariff_coverage_hours",
+                "cheap_duration_hours",
+            ):
+                point.field(name, float(getattr(item, name)))
+            if item.estimated_charge_cost_pence is not None:
+                point.field("estimated_charge_cost_pence", float(item.estimated_charge_cost_pence))
+            point.tag("decision", item.decision_id).tag("snapshot", item.forecast_snapshot_id)
+            point.field("decision_id", item.decision_id)
+            point.field("plan_version", item.plan_version)
+            point.field("plan_point_count", len(item.plan_points))
+            point.field("load_model", item.load_model)
+            for name in ("plan_start", "plan_stop", "target_soc_at"):
+                value = getattr(item, name)
+                if value is not None:
+                    point.field(name, value.astimezone(UTC).isoformat())
+            for name in (
+                "capacity_shortfall_kwh",
+                "window_shortfall_kwh",
+                "unavoidable_grid_import_kwh",
+                "reserve_shortfall_kwh",
+                "horizon_grid_charge_kwh",
+            ):
+                point.field(name, float(getattr(item, name)))
+            points.extend(
+                Point("battery_plan")
+                .tag("property", property_id)
+                .tag("forecast_day", item.forecast_day.isoformat())
+                .tag("decision", item.decision_id)
+                .tag("snapshot", item.forecast_snapshot_id)
+                .field("soc_percent", float(position.soc_percent))
+                .field("stored_kwh", float(position.stored_kwh))
+                .time(position.at, WritePrecision.S)
+                for position in item.plan_points
+            )
         return self._write(
             self.config.planning_bucket,
-            [point],
+            points,
             property_id=property_id,
             logical_kind="battery_decision",
             logical_key=f"{property_id}:{item.forecast_day.isoformat()}",
-            min_timestamp=item.created_at,
-            max_timestamp=item.created_at,
+            min_timestamp=min(item.created_at, item.plan_start or item.created_at),
+            max_timestamp=max(item.created_at, item.plan_stop or item.created_at),
         )
 
     def tariff_intervals(
@@ -425,7 +506,8 @@ from(bucket: "{self.config.telemetry_bucket}")
         stop: datetime,
         expected_points: int,
     ) -> ForecastSnapshot | None:
-        start_text = start.astimezone(UTC).isoformat()
+        # Retrieve the same snapshot's preceding bridge as well as its forecast day.
+        start_text = (start.astimezone(UTC) - timedelta(days=1)).isoformat()
         stop_text = stop.astimezone(UTC).isoformat()
         query = f'''
 from(bucket: "{self.config.planning_bucket}")
@@ -434,7 +516,9 @@ from(bucket: "{self.config.planning_bucket}")
   |> filter(fn: (r) => r.property == "{property_id}" and r.provider == "{provider}")
   |> filter(fn: (r) => r.role == "overnight")
   |> filter(fn: (r) => r._field == "raw_energy_kwh" or
-      r._field == "correction_factor" or r._field == "issued_at_epoch")
+      r._field == "correction_factor" or r._field == "issued_at_epoch" or
+      r._field == "interval_minutes" or r._field == "corrected_energy_kwh" or
+      r._field == "conservative_energy_kwh")
   |> pivot(rowKey: ["_time", "snapshot"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])
 '''
@@ -444,19 +528,64 @@ from(bucket: "{self.config.planning_bucket}")
             grouped.setdefault(snapshot_id, []).append(record)
         complete: list[ForecastSnapshot] = []
         for snapshot_id, records in grouped.items():
-            if len(records) != expected_points:
+            day_records = [r for r in records if start <= r.get_time() < stop]
+            if len(day_records) != expected_points:
                 continue
-            issued_epoch = float(records[0].values["issued_at_epoch"])
+            issued_epoch = float(day_records[0].values["issued_at_epoch"])
+            issued = datetime.fromtimestamp(issued_epoch, UTC)
+            intervals = tuple(
+                ForecastInterval(
+                    start=r.get_time(),
+                    end=r.get_time()
+                    + timedelta(minutes=float(r.values.get("interval_minutes", 60))),
+                    energy_kwh=float(r.values["raw_energy_kwh"]),
+                    power_kw=float(r.values["raw_energy_kwh"])
+                    * 60
+                    / float(r.values.get("interval_minutes", 60)),
+                    issued_at=datetime.fromtimestamp(float(r.values["issued_at_epoch"]), UTC),
+                    provider=provider,
+                    corrected_energy_kwh=(
+                        float(r.values["corrected_energy_kwh"])
+                        if "corrected_energy_kwh" in r.values
+                        else None
+                    ),
+                    conservative_energy_kwh=(
+                        float(r.values["conservative_energy_kwh"])
+                        if "conservative_energy_kwh" in r.values
+                        else None
+                    ),
+                )
+                for r in sorted(records, key=lambda r: r.get_time())
+            )
+            if any(item.issued_at != issued for item in intervals):
+                continue
+            if len({r.get_time() for r in day_records}) != expected_points:
+                continue
+            day_intervals = [item for item in intervals if start <= item.start < stop]
+            if (
+                day_intervals[0].start != start
+                or day_intervals[-1].end != stop
+                or any(
+                    a.end != b.start for a, b in zip(day_intervals, day_intervals[1:], strict=False)
+                )
+                or any(
+                    not math.isfinite(item.energy_kwh) or item.energy_kwh < 0
+                    for item in day_intervals
+                )
+                or len({float(r.values["correction_factor"]) for r in records}) != 1
+            ):
+                continue
             complete.append(
                 ForecastSnapshot(
                     provider=provider,
                     snapshot_id=snapshot_id,
-                    issued_at=datetime.fromtimestamp(issued_epoch, UTC),
-                    point_count=len(records),
+                    issued_at=issued,
+                    point_count=len(day_records),
                     raw_energy_kwh=sum(
-                        float(record.values["raw_energy_kwh"]) for record in records
+                        float(record.values["raw_energy_kwh"]) for record in day_records
                     ),
-                    correction_factor=float(records[0].values["correction_factor"]),
+                    correction_factor=float(day_records[0].values["correction_factor"]),
+                    intervals=intervals,
                 )
             )
         outbox = getattr(self, "outbox", None)
@@ -530,15 +659,8 @@ from(bucket: "{self.config.telemetry_bucket}")
   |> filter(fn: (r) => r._measurement == "energy_telemetry")
   |> filter(fn: (r) => r.property == "{property_id}")
   |> filter(fn: (r) => r._field == "daily_pv_kwh")
-  |> last()
-'''
-        count_query = f'''
-from(bucket: "{self.config.telemetry_bucket}")
-  |> range(start: time(v: "{start_text}"), stop: time(v: "{stop_text}"))
-  |> filter(fn: (r) => r._measurement == "energy_telemetry")
-  |> filter(fn: (r) => r.property == "{property_id}")
-  |> filter(fn: (r) => r._field == "daily_pv_kwh")
-  |> count()
+  |> keep(columns: ["_time", "_value"])
+  |> sort(columns: ["_time"])
 '''
         utc_duration = stop.astimezone(UTC) - start.astimezone(UTC)
         expected_forecast_points = int(utc_duration.total_seconds() / 3600)
@@ -549,14 +671,12 @@ from(bucket: "{self.config.telemetry_bucket}")
             stop,
             expected_forecast_points,
         )
-        actual = self._values(actual_query)
-        count = self._values(count_query)
-        expected_points = max(1, int(utc_duration.total_seconds() / expected_interval_seconds))
-        completeness = min(1.0, (int(count[-1]) if count else 0) / expected_points)
+        samples = [(r.get_time(), float(r.get_value())) for r in self._records(actual_query)]
+        actual = evaluate_actual_energy(samples, start, stop, expected_interval_seconds)
         return (
             snapshot.raw_energy_kwh if snapshot else 0.0,
-            float(actual[-1]) if actual else 0.0,
-            completeness,
+            actual.energy_kwh if actual.energy_kwh is not None else -1.0,
+            actual.coverage_fraction if actual.calibration_eligible else 0.0,
         )
 
     def _values(self, query: str) -> list[object]:

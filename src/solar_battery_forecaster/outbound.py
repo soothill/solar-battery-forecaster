@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import email.utils
 import json
+import math
 import secrets
 import time
 import zlib
@@ -16,6 +17,7 @@ MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 DEFAULT_RESPONSE_BYTES = 1024 * 1024
 MAX_JSON_DEPTH = 32
 MAX_JSON_NODES = 50_000
+MAX_RETRY_AFTER_SECONDS = 7 * 24 * 3600
 
 
 class ExternalServiceError(RuntimeError):
@@ -112,6 +114,16 @@ class RequestPacer:
         jitter_seconds: float,
         max_response_bytes: int = DEFAULT_RESPONSE_BYTES,
     ) -> None:
+        pacing = (
+            minimum_spacing_seconds, retry_base_seconds, retry_max_seconds,
+            retry_after_max_seconds, jitter_seconds,
+        )
+        if any(not math.isfinite(value) or not 0 <= value <= 3600 for value in pacing):
+            raise ValueError("request pacing values must be finite and bounded")
+        if isinstance(max_attempts, bool) or not isinstance(max_attempts, int) or not (
+            1 <= max_attempts <= 10
+        ):
+            raise ValueError("request attempts must be between 1 and 10")
         if (
             isinstance(max_response_bytes, bool)
             or not isinstance(max_response_bytes, int)
@@ -167,6 +179,11 @@ class RequestPacer:
                             f"{service} returned HTTP {response.status_code}"
                         )
                     if attempt == self.max_attempts:
+                        parsed = self._retry_after_seconds(response.headers.get("Retry-After"))
+                        if parsed is not None:
+                            self._defer_until = max(
+                                self._defer_until, time.monotonic() + parsed
+                            )
                         raise ExternalServiceError(
                             f"{service} remained unavailable after {attempt} attempts"
                         )
@@ -217,15 +234,21 @@ class RequestPacer:
         if not value:
             return None
         try:
-            return max(0.0, float(value))
+            seconds = float(value)
+            if not math.isfinite(seconds):
+                return None
+            return min(MAX_RETRY_AFTER_SECONDS, max(0.0, seconds))
         except ValueError:
             try:
                 parsed = email.utils.parsedate_to_datetime(value)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 return None
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=UTC)
-            return max(0.0, (parsed - datetime.now(UTC)).total_seconds())
+            return min(
+                MAX_RETRY_AFTER_SECONDS,
+                max(0.0, (parsed - datetime.now(UTC)).total_seconds()),
+            )
 
 
 def default_pacer() -> RequestPacer:

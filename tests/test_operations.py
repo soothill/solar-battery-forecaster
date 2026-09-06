@@ -4,7 +4,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from solar_battery_forecaster.models import TariffInterval
+from solar_battery_forecaster.config import BatteryConfig
+from solar_battery_forecaster.models import (
+    ForecastInterval,
+    ForecastSnapshot,
+    StoredTariffs,
+    TariffInterval,
+    forecast_snapshot_id,
+)
 from solar_battery_forecaster.operations import (
     ForecastPlanOperation,
     Operation,
@@ -156,7 +163,8 @@ async def test_cycle_replays_outbox_before_properties() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_forever_waits_full_interval_after_overrun(monkeypatch) -> None:
+@pytest.mark.parametrize(("elapsed", "delay"), [(20, 280), (350, 250), (650, 250)])
+async def test_run_forever_uses_start_to_start_deadlines(monkeypatch, elapsed, delay) -> None:
     operation = object.__new__(Operation)
     events: list[object] = []
 
@@ -169,10 +177,14 @@ async def test_run_forever_waits_full_interval_after_overrun(monkeypatch) -> Non
         raise StopAsyncIteration
 
     operation.run_cycle = overrun_cycle
+    clock = iter([0.0, float(elapsed), float(elapsed)])
+    monkeypatch.setattr(
+        "solar_battery_forecaster.operations.time", SimpleNamespace(monotonic=lambda: next(clock))
+    )
     monkeypatch.setattr("solar_battery_forecaster.operations.asyncio.sleep", stop_after_sleep)
     with pytest.raises(StopAsyncIteration):
         await operation.run_forever(300)
-    assert events == ["cycle-finished", 300]
+    assert events == ["cycle-finished", delay]
 
 
 def forecast_scan(
@@ -287,3 +299,74 @@ async def test_reconciliation_scan_reports_due_job_failure() -> None:
 
     assert await operation.run_cycle(local_time.astimezone(UTC)) is False
     assert [day.isoformat() for day in attempted] == ["2026-06-01"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("local_day", [datetime(2026, 3, 29), datetime(2026, 10, 25)])
+async def test_production_planner_preserves_bridge_and_reuses_snapshot(local_day):
+    zone = ZoneInfo("Europe/London")
+    day = local_day.replace(tzinfo=zone)
+    now = (day - timedelta(hours=2, minutes=30)).astimezone(UTC)
+    observed = now - timedelta(minutes=5)
+    start, stop = observed.replace(minute=0), (day + timedelta(days=1)).astimezone(UTC)
+    intervals = [
+        ForecastInterval(
+            start + timedelta(hours=i), start + timedelta(hours=i + 1), 0.0, 0.0, now, "test"
+        )
+        for i in range(int((stop - start).total_seconds() / 3600))
+    ]
+    tariffs = [TariffInterval(start, stop, 7.0, True)]
+    stored = {"snapshot": None, "fetches": 0, "decisions": []}
+
+    async def fetch(prop):
+        stored["fetches"] += 1
+        return intervals
+
+    def write_forecast(property_id, saved, factor, multiplier, **kwargs):
+        assert saved[0].start <= observed
+        assert kwargs["forecast_day_start"] == day
+        stored["snapshot"] = ForecastSnapshot(
+            "test",
+            forecast_snapshot_id(now),
+            now,
+            int((stop - day.astimezone(UTC)).total_seconds() / 3600),
+            0.0,
+            factor,
+            tuple(saved),
+        )
+        return "buffered"
+
+    def write_decision(property_id, decision):
+        stored["decisions"].append(decision)
+        return "buffered"
+
+    operation = object.__new__(ForecastPlanOperation)
+    operation.reporter = None
+    operation.store = SimpleNamespace(
+        latest_soc_reading=lambda _: (20.0, observed),
+        complete_forecast_snapshot=lambda *args: stored["snapshot"],
+        recent_daily_ratios=lambda _: [],
+        write_forecast=write_forecast,
+        tariff_intervals=lambda *args: StoredTariffs(tariffs, now),
+        write_decision=write_decision,
+    )
+    operation.config = SimpleNamespace(schedule=SimpleNamespace(telemetry_stale_after_seconds=900))
+    operation.adapters = {"home": SimpleNamespace(name="test", fetch=fetch)}
+    prop = SimpleNamespace(
+        id="home",
+        timezone="Europe/London",
+        inverter=SimpleNamespace(rated_power_kw=6),
+        forecast=SimpleNamespace(initial_correction_factor=1, conservative_multiplier=0.8),
+        battery=BatteryConfig(usable_capacity_kwh=9, max_charge_power_kw=3),
+        load=SimpleNamespace(expected_kwh_until_next_cheap_window=8),
+        tariff=SimpleNamespace(stale_after_minutes=480),
+    )
+    await operation._plan(prop, day.date(), now)
+    await operation._plan(prop, day.date(), now)
+    assert stored["fetches"] == 1
+    first, second = stored["decisions"]
+    assert first.plan_version == second.plan_version == 1
+    assert first.plan_points == second.plan_points
+    assert first.plan_points[0].at == observed
+    assert first.plan_points[-1].at == stop
+    assert first.tariff_coverage_hours == (stop - observed).total_seconds() / 3600

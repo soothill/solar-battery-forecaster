@@ -39,6 +39,13 @@ input, select { background: var(--panel); color: inherit; border: 1px solid var(
 .cheap { color: var(--cheap) !important; }
 .canvas-wrap { width: 100%; height: min(55vh, 430px); min-height: 280px; }
 canvas { display: block; width: 100%; height: 100%; }
+canvas:focus-visible, summary:focus-visible { outline: 2px solid var(--battery-actual); outline-offset: 3px; }
+details { margin-top: 18px; }
+summary { cursor: pointer; padding: 8px 0; }
+.table-wrap { overflow: auto; max-height: 400px; }
+table { border-collapse: collapse; width: 100%; font-size: .8rem; }
+th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--grid); }
+caption { text-align: left; padding: 12px 0; color: var(--muted); }
 .axes { display: flex; justify-content: space-between; color: var(--muted); font-size: .75rem; padding: 2px 3px 0 35px; }
 .note { color: var(--muted); font-size: .75rem; line-height: 1.45; margin-top: 15px; }
 .status-card { margin-top: 12px; }

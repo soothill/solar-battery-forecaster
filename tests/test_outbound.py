@@ -112,6 +112,34 @@ def test_retry_after_http_date_is_supported() -> None:
     assert 0 < parsed <= 30
 
 
+@pytest.mark.parametrize("value", ["NaN", "inf", "-inf"])
+def test_non_finite_retry_after_uses_normal_backoff(value):
+    assert RequestPacer._retry_after_seconds(value) is None  # noqa: SLF001
+    assert pacer()._backoff(1, value) == 0.01  # noqa: SLF001
+
+
+def test_retry_after_has_finite_outer_bound():
+    assert RequestPacer._retry_after_seconds("1e300") == 604800  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_final_attempt_retains_retry_after_for_next_call():
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429, headers={"Retry-After": "60"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        limiter = pacer(attempts=1)
+        with pytest.raises(ExternalServiceError, match="remained unavailable"):
+            await limiter.request_json(client, "GET", "https://example.invalid", service="test")
+        with pytest.raises(ExternalServiceError, match="deferred"):
+            await limiter.request_json(client, "GET", "https://example.invalid", service="test")
+    assert calls == 1
+
+
 @pytest.mark.asyncio
 async def test_over_limit_retry_after_defers_without_retrying_early() -> None:
     calls = 0

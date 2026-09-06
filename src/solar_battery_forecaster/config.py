@@ -6,11 +6,14 @@ import re
 from copy import deepcopy
 from pathlib import Path
 from typing import Literal, TypeAlias
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ENV_PATTERN = re.compile(r"^\$\{([A-Z][A-Z0-9_]*)\}$")
+PROPERTY_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 ConfigScope: TypeAlias = Literal[
     "telemetry", "tariff", "forecast-plan", "reconciliation", "dashboard"
 ]
@@ -29,6 +32,7 @@ class InfluxConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     url: str
+    allow_insecure_http: bool = False
     org: str
     telemetry_bucket: str = Field(min_length=1)
     tariff_bucket: str = Field(min_length=1)
@@ -37,6 +41,20 @@ class InfluxConfig(BaseModel):
 
     @model_validator(mode="after")
     def require_distinct_buckets(self) -> InfluxConfig:
+        parsed = urlsplit(self.url)
+        if (
+            not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.scheme not in {"https", "http"}
+        ):
+            raise ValueError("InfluxDB URL must be an HTTP(S) URL without embedded credentials")
+        if parsed.scheme != "https" and not self.allow_insecure_http:
+            raise ValueError(
+                "InfluxDB requires HTTPS; isolated tests may opt into allow_insecure_http"
+            )
         buckets = {
             self.telemetry_bucket,
             self.tariff_bucket,
@@ -180,11 +198,14 @@ class BatteryConfig(BaseModel):
     reserve_kwh: float = Field(default=1, ge=0)
     max_charge_power_kw: float = Field(gt=0)
     charge_efficiency: float = Field(default=0.94, gt=0, le=1)
+    discharge_efficiency: float = Field(default=1.0, gt=0, le=1)
 
     @model_validator(mode="after")
     def check_soc_range(self) -> BatteryConfig:
         if self.minimum_soc_percent >= self.maximum_soc_percent:
             raise ValueError("minimum_soc_percent must be below maximum_soc_percent")
+        if self.reserve_kwh > self.usable_capacity_kwh:
+            raise ValueError("reserve_kwh must not exceed usable_capacity_kwh")
         return self
 
 
@@ -207,7 +228,7 @@ class TariffConfig(BaseModel):
 
 
 class PropertyConfig(BaseModel):
-    id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]+$")
+    id: str = Field(pattern=PROPERTY_ID_PATTERN.pattern, min_length=2, max_length=64)
     timezone: str = "Europe/London"
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
@@ -217,6 +238,15 @@ class PropertyConfig(BaseModel):
     forecast: ForecastConfig = Field(default_factory=ForecastConfig)
     load: LoadConfig = Field(default_factory=LoadConfig)
     tariff: TariffConfig
+
+    @field_validator("timezone")
+    @classmethod
+    def valid_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("timezone must name a valid IANA timezone") from exc
+        return value
 
 
 class AppConfig(BaseModel):

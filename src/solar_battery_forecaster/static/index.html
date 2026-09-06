@@ -27,7 +27,7 @@
         <article><span>Generated</span><strong id="actual-total">—</strong><small>kWh</small></article>
         <article><span>Battery</span><strong id="battery-now">—</strong><small>%</small></article>
         <article><span>Target</span><strong id="battery-target">—</strong><small>%</small></article>
-        <article><span>Grid charge</span><strong id="grid-charge">—</strong><small>kWh</small></article>
+        <article><span>Overnight grid charge</span><strong id="grid-charge">—</strong><small>kWh</small></article>
         <article><span>Est. cost</span><strong id="charge-cost">—</strong><small>p</small></article>
       </section>
 
@@ -36,15 +36,27 @@
           <div><p class="eyebrow">ONE DAY</p><h2>Generation & battery</h2></div>
           <p id="status" role="status">Loading…</p>
         </div>
-        <div class="legend" aria-hidden="true">
+        <div class="legend">
           <span class="forecast">Forecast solar</span><span class="actual">Actual solar</span>
           <span class="planned-soc">Planned battery</span><span class="actual-soc">Actual battery</span>
           <span class="cheap">Cheap rate</span>
         </div>
-        <div class="canvas-wrap"><canvas id="curve" aria-label="Solar generation and battery state chart"></canvas></div>
-        <div class="axes"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+        <div class="canvas-wrap"><canvas id="curve" tabindex="0" aria-label="Solar generation and battery state chart" aria-describedby="inspection-help point-detail"></canvas></div>
+        <div class="axes" id="axes"></div>
+        <p class="note" id="inspection-help">Tap the chart to inspect a time, or focus it and use arrow keys, Home or End. The table includes the complete plan, beginning at the observed battery state.</p>
+        <p class="note" id="point-detail" aria-live="polite"></p>
+        <p class="note" id="freshness"></p>
+        <p class="note" id="energy-quality"></p>
+        <p class="note" id="shortfalls"></p>
         <p class="note" id="assumption"></p>
         <p class="note" id="factor"></p>
+        <details><summary>View chart data as a table</summary>
+          <div class="table-wrap"><table>
+            <caption>Generation and battery samples. Times use the property's timezone. Missing values are shown as —.</caption>
+            <thead><tr><th scope="col">Time</th><th scope="col">Forecast kW</th><th scope="col">Actual kW</th><th scope="col">Planned %</th><th scope="col">Battery %</th></tr></thead>
+            <tbody id="data-rows"></tbody>
+          </table></div>
+        </details>
       </section>
 
       <section class="chart-card status-card" id="system-status" aria-labelledby="system-status-title">

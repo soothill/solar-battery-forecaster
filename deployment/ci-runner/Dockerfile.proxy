@@ -5,5 +5,5 @@ COPY squid.conf /etc/squid/squid.conf
 RUN squid -k parse -f /etc/squid/squid.conf
 USER 10001:10001
 HEALTHCHECK --interval=2s --timeout=2s --start-period=5s --retries=15 \
-  CMD ["squidclient", "-h", "127.0.0.1", "-p", "3128", "mgr:info"]
+  CMD ["squid", "-k", "check", "-f", "/etc/squid/squid.conf"]
 ENTRYPOINT ["squid", "--foreground", "-f", "/etc/squid/squid.conf"]

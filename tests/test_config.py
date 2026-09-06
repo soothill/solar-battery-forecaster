@@ -3,7 +3,14 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from solar_battery_forecaster.config import HttpConfig, OutboxConfig, load_config
+from solar_battery_forecaster.config import (
+    BatteryConfig,
+    HttpConfig,
+    InfluxConfig,
+    OutboxConfig,
+    PropertyConfig,
+    load_config,
+)
 
 
 def test_missing_environment_variable_fails(tmp_path: Path) -> None:
@@ -63,6 +70,48 @@ properties:
     forecast:
       api_key: ${UNRELATED_FORECAST_SECRET}
 """
+
+
+@pytest.mark.parametrize(
+    ("identifier", "valid"), [("ab", True), ("a" * 64, True), ("a" * 65, False), ("a", False)]
+)
+def test_property_id_contract(identifier, valid):
+    import yaml
+
+    data = yaml.safe_load(SCOPED_CONFIG)["properties"][0]
+    data["id"] = identifier
+    if valid:
+        assert PropertyConfig.model_validate(data).id == identifier
+    else:
+        with pytest.raises(ValidationError):
+            PropertyConfig.model_validate(data)
+
+
+def test_timezone_and_reserve_fail_at_configuration_load():
+    import yaml
+
+    data = yaml.safe_load(SCOPED_CONFIG)["properties"][0]
+    data["timezone"] = "Definitely/Not_A_Zone"
+    with pytest.raises(ValidationError, match="timezone"):
+        PropertyConfig.model_validate(data)
+    with pytest.raises(ValidationError, match="reserve_kwh"):
+        BatteryConfig(usable_capacity_kwh=2, max_charge_power_kw=1, reserve_kwh=3)
+
+
+def test_influx_requires_https_and_explicit_isolated_test_opt_in():
+    fields = dict(
+        org="test",
+        token="test",
+        telemetry_bucket="telemetry",
+        tariff_bucket="tariff",
+        planning_bucket="planning",
+    )
+    assert InfluxConfig(url="https://influx.invalid", **fields)
+    with pytest.raises(ValidationError, match="requires HTTPS"):
+        InfluxConfig(url="http://127.0.0.1:8086", **fields)
+    assert InfluxConfig(url="http://127.0.0.1:8086", allow_insecure_http=True, **fields)
+    with pytest.raises(ValidationError, match="embedded credentials"):
+        InfluxConfig(url="https://user:secret@influx.invalid", **fields)
 
 
 @pytest.mark.parametrize(

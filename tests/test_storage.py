@@ -19,6 +19,10 @@ class ForecastRecord:
             "raw_energy_kwh": energy,
             "correction_factor": 0.9,
         }
+        self.at = datetime(2026, 9, 6, tzinfo=UTC) + timedelta(hours=energy % 2)
+
+    def get_time(self) -> datetime:
+        return self.at
 
 
 def test_decision_persists_input_provenance() -> None:
@@ -84,7 +88,7 @@ def test_complete_forecast_selects_newest_complete_snapshot() -> None:
         "home",
         "provider",
         datetime(2026, 9, 6, tzinfo=UTC),
-        datetime(2026, 9, 7, tzinfo=UTC),
+        datetime(2026, 9, 6, 2, tzinfo=UTC),
         expected_points=2,
     )
 

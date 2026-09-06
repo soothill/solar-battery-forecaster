@@ -18,11 +18,11 @@ Home Assistant is not required.
 | Capability | Adapter | Status |
 |---|---|---|
 | Solar forecast | Open-Meteo tilted irradiance | Implemented |
-| Inverter telemetry | Sigenergy Cloud OpenAPI | Implemented, requires developer AppKey |
+| Inverter telemetry | Sigenergy Cloud OpenAPI | Implemented against fixtures; live vendor acceptance pending |
 | Electricity prices | Octopus Energy REST API | Implemented |
 | Intelligent Octopus bonus dispatches | Octopus GraphQL `flexPlannedDispatches` | Planned |
 | Time-series storage | InfluxDB OSS 2.x | Implemented |
-| Overnight target | Conservative energy balance | Implemented, recommendation-only |
+| Overnight target | Interval energy/SoC model | Implemented, recommendation-only; site acceptance required |
 | Battery control | Vendor-specific adapters | Deliberately disabled |
 
 The Sigenergy adapter uses the official developer AppKey flow. Apply through the
@@ -60,10 +60,11 @@ and schedules, which keeps half-hourly data correct over daylight-saving changes
 - `electricity_tariff`: Octopus price intervals and a derived `is_cheap` field.
 - `battery_decision`: recommendation inputs, charge-window cost, and output;
   `automation_enabled` is always false.
+- `battery_plan`: the decision's timestamped SoC trajectory, bound to its exact forecast snapshot.
 - `pv_daily`: forecast, actual, error, daily ratio, and learned correction factor.
 
-Tags are intentionally limited to stable values such as property, provider, and source to
-avoid high series cardinality. Addresses, account numbers, API keys, serial numbers, and
+Tags include property/provider/source and immutable forecast/decision identities. Snapshot and
+decision tags grow over time, so set explicit bucket retention. Addresses, account numbers, API keys, serial numbers, and
 installation IDs are not tags and are not written by the supplied adapters.
 
 ## Quick start
@@ -128,8 +129,8 @@ The public Octopus tariff endpoint returns price validity intervals. The service
 interval as cheap when its inclusive-of-VAT price is at or below the configured threshold.
 This works for fixed off-peak and dynamic tariffs without hard-coding clock times.
 
-Version 0.1 accepts only positive price intervals of at most two hours. Some real Intelligent
-Octopus responses contain 6-hour or 18-hour standard-rate intervals and are therefore rejected.
+Long and open-ended standard-rate intervals are clipped to the requested horizon. Bounded
+pagination collects the complete timeline; overlapping or incomplete coverage fails closed.
 The Intelligent tariff codes in `config.example.yaml` are illustrative, not a production-tested
 default; test the property's exact codes with `tariff --once` before relying on them.
 
@@ -188,6 +189,12 @@ pytest
 
 Contributions for additional inverter, forecast, and tariff adapters are welcome. Keep
 vendor payloads inside adapters and return the common models from `models.py`.
+
+## Production release gates
+
+Read the [production readiness checklist](docs/production-readiness.md) before rollout. A passing
+fixture test is not live Sigenergy acceptance. This candidate retains recommendation-only operation,
+and does not enable a runner, alter GitHub protections, merge to main or deploy itself.
 
 ## License
 

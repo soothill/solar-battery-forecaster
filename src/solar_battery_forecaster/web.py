@@ -5,11 +5,14 @@ import importlib.resources
 import json
 import logging
 import mimetypes
+import signal
+import threading
 from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import PurePosixPath
 from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo
 
 from solar_battery_forecaster.config import AppConfig, load_config
 from solar_battery_forecaster.dashboard import InfluxDashboardRepository
@@ -55,7 +58,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/v1/properties":
             self._json(
                 HTTPStatus.OK,
-                {"properties": [{"id": item.id} for item in self.config.properties]},
+                {
+                    "properties": [
+                        {"id": item.id, "timezone": item.timezone}
+                        for item in self.config.properties
+                    ]
+                },
             )
             return
         prefix = "/api/v1/properties/"
@@ -68,7 +76,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if property_id not in properties:
             self._json(HTTPStatus.NOT_FOUND, {"error": "unknown_property"})
             return
-        requested = query.get("date", [datetime.now().date().isoformat()])[0]
+        today = datetime.now(ZoneInfo(properties[property_id].timezone)).date().isoformat()
+        requested = query.get("date", [today])[0]
         try:
             day = date.fromisoformat(requested)
         except ValueError:
@@ -121,7 +130,9 @@ def make_server(
         pass
 
     BoundHandler.config = config
-    BoundHandler.repository = repository or InfluxDashboardRepository(config.influxdb)
+    BoundHandler.repository = repository or InfluxDashboardRepository(
+        config.influxdb, expected_interval_seconds=config.schedule.telemetry_seconds
+    )
     if config.observability.status_directory is None and status_repository is None:
         raise ValueError("dashboard status directory is not configured")
     BoundHandler.status_repository = status_repository or StatusRepository(
@@ -147,15 +158,32 @@ def main() -> None:
         config.observability, "dashboard", [item.id for item in config.properties]
     )
     server: ThreadingHTTPServer | None = None
+    stopped = threading.Event()
+    previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+    def request_stop(signum: int, frame: object) -> None:
+        stopped.set()
+
     try:
+        signal.signal(signal.SIGTERM, request_stop)
         server = make_server(config, args.host, args.port)
+        server.timeout = 0.5
         LOGGER.info("dashboard listening on http://%s:%d", args.host, args.port)
-        server.serve_forever()
+        while not stopped.is_set():
+            server.handle_request()
     finally:
-        if server is not None:
-            server.server_close()
-            server.RequestHandlerClass.repository.close()
-        close_reporter(reporter)
+        try:
+            if server is not None:
+                try:
+                    # Wait for existing request threads before closing their shared client.
+                    server.server_close()
+                finally:
+                    server.RequestHandlerClass.repository.close()
+        finally:
+            try:
+                close_reporter(reporter)
+            finally:
+                signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

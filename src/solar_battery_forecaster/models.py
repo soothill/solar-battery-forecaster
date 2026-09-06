@@ -16,6 +16,8 @@ class ForecastInterval:
     power_kw: float
     issued_at: datetime
     provider: str
+    corrected_energy_kwh: float | None = None
+    conservative_energy_kwh: float | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,13 @@ class Telemetry:
 
 
 @dataclass(frozen=True)
+class PlanPoint:
+    at: datetime
+    soc_percent: float
+    stored_kwh: float
+
+
+@dataclass(frozen=True)
 class BatteryDecision:
     created_at: datetime
     current_soc_percent: float
@@ -69,6 +78,18 @@ class BatteryDecision:
     cheap_rate_average_pence: float | None = None
     estimated_charge_cost_pence: float | None = None
     charge_limited_by_window: bool = False
+    decision_id: str = ""
+    plan_version: int = 0
+    plan_start: datetime | None = None
+    plan_stop: datetime | None = None
+    target_soc_at: datetime | None = None
+    plan_points: tuple[PlanPoint, ...] = ()
+    capacity_shortfall_kwh: float = 0.0
+    window_shortfall_kwh: float = 0.0
+    unavoidable_grid_import_kwh: float = 0.0
+    reserve_shortfall_kwh: float = 0.0
+    horizon_grid_charge_kwh: float = 0.0
+    load_model: str = "uniform_elapsed"
 
 
 @dataclass(frozen=True)
@@ -79,3 +100,4 @@ class ForecastSnapshot:
     point_count: int
     raw_energy_kwh: float
     correction_factor: float
+    intervals: tuple[ForecastInterval, ...] = ()

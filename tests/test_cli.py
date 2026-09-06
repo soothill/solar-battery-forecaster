@@ -1,3 +1,5 @@
+import asyncio
+import signal
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -99,3 +101,52 @@ def test_outbox_operator_parser_requires_explicit_scope_and_action() -> None:
     assert args.command == "outbox"
     assert args.outbox_action == "export-quarantine"
     assert args.scope == "telemetry"
+
+
+@pytest.mark.asyncio
+async def test_sigterm_requests_graceful_stop_and_restores_handler(monkeypatch):
+    config = SimpleNamespace(properties=[], schedule=SimpleNamespace(telemetry_seconds=300))
+    closed = []
+    callbacks = {}
+    loop = asyncio.get_running_loop()
+    original = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(
+        loop, "add_signal_handler", lambda sig, callback: callbacks.update({sig: callback})
+    )
+    monkeypatch.setattr(loop, "remove_signal_handler", lambda sig: callbacks.pop(sig))
+    monkeypatch.setattr(cli, "load_config", lambda path, scope: config)
+    monkeypatch.setattr(cli, "close_reporter", lambda reporter: closed.append("reporter"))
+
+    class GracefulOperation(FailedOnceOperation):
+        async def run_forever(self, interval, stopping):
+            assert interval == 300 and not stopping.is_set()
+            callbacks[signal.SIGTERM]()
+            assert stopping.is_set()
+            closed.append("cycle_finished")
+
+        async def close(self):
+            closed.append("operation")
+
+    monkeypatch.setitem(cli.WORKERS, "telemetry", GracefulOperation)
+    result = await cli._run(Namespace(command="telemetry", config="unused", once=False))
+    assert result == 0
+    assert closed == ["cycle_finished", "operation", "reporter"]
+    assert not callbacks
+    assert signal.getsignal(signal.SIGTERM) is original
+
+
+@pytest.mark.asyncio
+async def test_reporter_closes_even_if_operation_close_fails(monkeypatch):
+    config = SimpleNamespace(properties=[], schedule=SimpleNamespace())
+    closed = []
+
+    class CloseFailure(FailedOnceOperation):
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    monkeypatch.setattr(cli, "load_config", lambda path, scope: config)
+    monkeypatch.setitem(cli.WORKERS, "telemetry", CloseFailure)
+    monkeypatch.setattr(cli, "close_reporter", lambda reporter: closed.append(True))
+    with pytest.raises(RuntimeError, match="close failed"):
+        await cli._run(Namespace(command="telemetry", config="unused", once=True))
+    assert closed == [True]

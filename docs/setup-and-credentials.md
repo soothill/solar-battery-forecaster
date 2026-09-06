@@ -131,11 +131,11 @@ GraphQL support for Intelligent Octopus bonus dispatches (`flexPlannedDispatches
 implemented.
 
 > [!WARNING]
-> The current adapter rejects any standard-rate interval longer than two hours. Some real
-> Intelligent Octopus tariff responses contain 6-hour or 18-hour intervals, so the illustrative
-> Intelligent codes in `config.example.yaml` can fail with `tariff provider returned an invalid
-> interval`. Do not treat that example as production-compatible. Test the property's exact tariff
-> with `tariff --once`; this limitation must be resolved before using an affected tariff.
+> Standard-rate intervals, including 6-hour, 18-hour and open-ended rates, are clipped to the
+> requested horizon. Pagination is bounded and must remain on the same trusted endpoint.
+> Overlapping, incomplete, non-finite or timezone-naive rate data is rejected. Test the property's
+> exact tariff with `tariff --once`; the illustrative codes are not evidence for that property,
+> and standard rates do not include Intelligent Octopus bonus dispatches.
 
 ## 3. Confirm Open-Meteo usage
 
@@ -224,7 +224,7 @@ influx auth create --org-id ORG_ID --description solar-dashboard \
   --read-bucket PLANNING_BUCKET_ID
 ```
 
-Use HTTPS whenever InfluxDB traffic crosses a network boundary. Trust the private CA in the LXC's
+HTTPS is required by default for InfluxDB. Trust the private CA in the LXC's
 system trust store; never disable certificate verification.
 
 ## 5. Create the Proxmox LXC
@@ -304,7 +304,8 @@ property location and infrastructure metadata.
 
 | Influx field | Units/range or enum | Privacy and authoritative source | Safe example |
 |---|---|---|---|
-| `influxdb.url` | Required URL; HTTPS is an operational rule across a network boundary | Private infrastructure; Influx administrator | `https://influxdb.example.invalid:8086` |
+| `influxdb.url` | Required HTTPS URL; certificate verification stays enabled | Private infrastructure; Influx administrator | `https://influxdb.example.invalid:8086` |
+| `influxdb.allow_insecure_http` | Default `false`; explicit exception only for an isolated disposable test endpoint, never production | Test operator | `false` |
 | `influxdb.org` | Required organization **name**, not ID | Private tenant metadata; `influx org list`/administrator | `example-org` |
 | `telemetry_bucket` | Non-empty name; all three bucket names must differ | Private infrastructure; Influx administrator | `solar_telemetry` |
 | `tariff_bucket` | Non-empty, distinct bucket name | Private infrastructure; Influx administrator | `solar_tariff` |
@@ -732,6 +733,7 @@ if len(matches) != 1:
     raise SystemExit("selected property alias must match exactly once")
 config["properties"] = matches
 config["influxdb"]["url"] = "http://127.0.0.1:9"
+config["influxdb"]["allow_insecure_http"] = True  # Isolated deliberate connection refusal only.
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
 descriptor = os.open(destination, flags, 0o640)
 os.fchown(descriptor, 0, grp.getgrnam("solar-config").gr_gid)
@@ -899,7 +901,7 @@ Record evidence without secrets, addresses, coordinates, account identifiers, pa
 - [ ] Configuration and all five environment files pass ownership/read-isolation checks.
 - [ ] Each scope passes `validate`; the limitation of that command is understood.
 - [ ] Telemetry one-shot authenticates to Sigenergy and a plausible confirmed Influx record appears.
-- [ ] Tariff one-shot returns only valid intervals of at most two hours and confirmed records appear.
+- [ ] Tariff one-shot returns a complete, non-overlapping timeline for the requested horizon and confirmed records appear.
 - [ ] A due forecast creates one complete snapshot and a recommendation; reconciliation later
   creates the daily actual-versus-forecast factor.
 - [ ] Cleanly stopping/starting each service in turn leaves the other four running.
@@ -967,7 +969,7 @@ Common checks:
 |---|---|
 | `validate` reports Influx health failure | DNS, route, HTTPS certificate trust, Influx health and the service's token file; do not disable TLS verification |
 | Telemetry authentication fails | Correct region, approved Monitoring app, current AppKey/AppSecret, authorized system ID, portal call limits and clock |
-| Tariff interval is invalid | Confirm exact product/tariff codes; the current adapter cannot accept intervals longer than two hours |
+| Tariff interval is invalid | Confirm exact product/tariff codes, coverage, timezone-aware boundaries and finite prices; inspect bounded pagination failures |
 | No forecast/reconciliation record | Confirm local time zone and due schedule, complete prerequisite data, Influx read grants and status heartbeat |
 | Pending outbox grows | Restore Influx safely, inspect `outbox status`/`verify` as that writer, check disk reserve, then use `drain`; never delete the database |
 | Dashboard is stale | Check all five heartbeats, dashboard read token grants and confirmed Influx delivery; SQLite pending data is intentionally absent |

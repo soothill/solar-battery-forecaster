@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
+from contextlib import suppress
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -21,7 +23,7 @@ from solar_battery_forecaster.models import (
 )
 from solar_battery_forecaster.observability import HealthReporter
 from solar_battery_forecaster.outbound import RequestPacer
-from solar_battery_forecaster.planner import correction_factor, make_decision
+from solar_battery_forecaster.planner import correction_factor, make_interval_decision
 from solar_battery_forecaster.storage import InfluxStore
 from solar_battery_forecaster.tariffs import validated_tariff_timeline
 
@@ -31,11 +33,12 @@ LOGGER = logging.getLogger(__name__)
 def covered_duration_hours(
     intervals: list[TariffInterval], start: datetime, stop: datetime
 ) -> float:
+    start, stop = start.astimezone(UTC), stop.astimezone(UTC)
     covered = 0.0
     cursor = start
     for item in sorted(intervals, key=lambda value: value.start):
-        interval_start = max(start, item.start)
-        interval_stop = min(stop, item.end)
+        interval_start = max(start, item.start.astimezone(UTC))
+        interval_stop = min(stop, item.end.astimezone(UTC))
         if interval_stop <= interval_start:
             continue
         if interval_start > cursor + timedelta(seconds=1):
@@ -51,11 +54,12 @@ def covered_duration_hours(
 def cheap_window(
     intervals: list[TariffInterval], start: datetime, stop: datetime
 ) -> tuple[float, float | None]:
+    start, stop = start.astimezone(UTC), stop.astimezone(UTC)
     hours = 0.0
     weighted_price = 0.0
     for item in intervals:
-        overlap_start = max(start, item.start)
-        overlap_stop = min(stop, item.end)
+        overlap_start = max(start, item.start.astimezone(UTC))
+        overlap_stop = min(stop, item.end.astimezone(UTC))
         if not item.is_cheap or overlap_stop <= overlap_start:
             continue
         duration = (overlap_stop - overlap_start).total_seconds() / 3600
@@ -123,10 +127,30 @@ class Operation:
                 await asyncio.sleep(self.config.schedule.property_phase_seconds)
         return success
 
-    async def run_forever(self, interval_seconds: float) -> None:
+    async def run_forever(
+        self, interval_seconds: float, stop_event: asyncio.Event | None = None
+    ) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("worker interval must be positive")
+        deadline = time.monotonic()
         while True:
+            if stop_event is not None and stop_event.is_set():
+                break
             await self.run_monitored_cycle()
-            await asyncio.sleep(interval_seconds)
+            if stop_event is not None and stop_event.is_set():
+                break
+            deadline += interval_seconds
+            now = time.monotonic()
+            if now > deadline:
+                skipped = math.floor((now - deadline) / interval_seconds) + 1
+                deadline += skipped * interval_seconds
+                LOGGER.warning("%s collection overrun; skipped=%d", self.name, skipped)
+            delay = max(0.0, deadline - time.monotonic())
+            if stop_event is None:
+                await asyncio.sleep(delay)
+            else:
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stop_event.wait(), timeout=delay)
 
     async def run_monitored_cycle(self) -> bool:
         reporter = getattr(self, "reporter", None)
@@ -262,13 +286,24 @@ class ForecastPlanOperation(Operation):
 
     async def _plan(self, prop: PropertyConfig, forecast_day: date, now: datetime) -> None:
         timezone = ZoneInfo(prop.timezone)
-        local_now = now.astimezone(timezone)
         forecast_start = datetime.combine(forecast_day, datetime.min.time(), tzinfo=timezone)
         forecast_stop = forecast_start + timedelta(days=1)
         expected_points = int(
             (forecast_stop.astimezone(UTC) - forecast_start.astimezone(UTC)).total_seconds() / 3600
         )
         adapter = self.adapters[prop.id]
+        soc_reading = await asyncio.to_thread(self.store.latest_soc_reading, prop.id)
+        if soc_reading is None:
+            raise RuntimeError("battery SoC is unavailable")
+        current_soc, observed_at = soc_reading
+        soc_age = now.astimezone(UTC) - observed_at.astimezone(UTC)
+        if (
+            not math.isfinite(current_soc)
+            or not 0 <= current_soc <= 100
+            or soc_age < timedelta(0)
+            or soc_age > timedelta(seconds=self.config.schedule.telemetry_stale_after_seconds)
+        ):
+            raise RuntimeError("battery SoC is invalid or stale")
         snapshot = await asyncio.to_thread(
             self.store.complete_forecast_snapshot,
             prop.id,
@@ -289,12 +324,20 @@ class ForecastPlanOperation(Operation):
             )
             ratios = await asyncio.to_thread(self.store.recent_daily_ratios, prop.id)
             factor = correction_factor(ratios, prop.forecast.initial_correction_factor)
+            plan_intervals = [
+                item
+                for item in all_intervals
+                if item.end > observed_at and item.start < forecast_stop
+            ]
             forecast_disposition = await asyncio.to_thread(
                 self.store.write_forecast,
                 prop.id,
-                intervals,
+                plan_intervals,
                 factor,
                 prop.forecast.conservative_multiplier,
+                forecast_day_start=forecast_start,
+                forecast_day_stop=forecast_stop,
+                inverter_limit_kw=prop.inverter.rated_power_kw,
             )
             self.record_accepted(forecast_disposition)
             LOGGER.info("accepted forecast for %s delivery=%s", prop.id, forecast_disposition)
@@ -306,6 +349,7 @@ class ForecastPlanOperation(Operation):
             factor = snapshot.correction_factor
             snapshot_id = snapshot.snapshot_id
             issued_at = snapshot.issued_at
+            plan_intervals = list(snapshot.intervals)
         snapshot_age = now.astimezone(UTC) - issued_at.astimezone(UTC)
         if snapshot_age < -timedelta(minutes=5) or snapshot_age > timedelta(hours=36):
             raise RuntimeError("forecast snapshot is stale")
@@ -317,22 +361,9 @@ class ForecastPlanOperation(Operation):
         ):
             raise RuntimeError("forecast snapshot is invalid")
 
-        soc_reading = await asyncio.to_thread(self.store.latest_soc_reading, prop.id)
-        if soc_reading is None:
-            raise RuntimeError("battery SoC is unavailable")
-        current_soc, observed_at = soc_reading
-        soc_age = now.astimezone(UTC) - observed_at.astimezone(UTC)
-        if (
-            not math.isfinite(current_soc)
-            or not 0 <= current_soc <= 100
-            or soc_age < -timedelta(minutes=5)
-            or soc_age > timedelta(seconds=self.config.schedule.telemetry_stale_after_seconds)
-        ):
-            raise RuntimeError("battery SoC is invalid or stale")
-
-        charge_window_stop = local_now + timedelta(hours=12)
+        charge_window_stop = forecast_stop.astimezone(UTC)
         tariff_batch = await asyncio.to_thread(
-            self.store.tariff_intervals, prop.id, local_now, charge_window_stop
+            self.store.tariff_intervals, prop.id, observed_at, charge_window_stop
         )
         if tariff_batch is None:
             raise RuntimeError("stored tariff is unavailable")
@@ -342,15 +373,18 @@ class ForecastPlanOperation(Operation):
             minutes=prop.tariff.stale_after_minutes
         ):
             raise RuntimeError("stored tariff is stale")
-        required_coverage = (charge_window_stop - local_now).total_seconds() / 3600
-        coverage = covered_duration_hours(tariff_timeline, local_now, charge_window_stop)
+        required_coverage = (
+            charge_window_stop - observed_at.astimezone(UTC)
+        ).total_seconds() / 3600
+        coverage = covered_duration_hours(tariff_timeline, observed_at, charge_window_stop)
         if coverage + 1e-6 < required_coverage:
             raise RuntimeError("stored tariff coverage is incomplete")
-        cheap_hours, cheap_average = cheap_window(tariff_timeline, local_now, charge_window_stop)
-        decision = make_decision(
+        decision = make_interval_decision(
             battery=prop.battery,
             current_soc_percent=current_soc,
-            raw_solar_kwh=raw_solar_kwh,
+            forecast_intervals=plan_intervals,
+            tariff_intervals=tariff_timeline,
+            inverter_limit_kw=prop.inverter.rated_power_kw,
             factor=factor,
             conservative_multiplier=prop.forecast.conservative_multiplier,
             expected_load_kwh=prop.load.expected_kwh_until_next_cheap_window,
@@ -358,11 +392,9 @@ class ForecastPlanOperation(Operation):
             forecast_snapshot_id=snapshot_id,
             forecast_issued_at=issued_at,
             soc_observed_at=observed_at,
-            tariff_coverage_start=local_now,
-            tariff_coverage_stop=charge_window_stop,
-            tariff_coverage_hours=coverage,
-            cheap_duration_hours=cheap_hours,
-            cheap_rate_average_pence=cheap_average,
+            day_start=forecast_start,
+            day_stop=forecast_stop,
+            created_at=now,
         )
         disposition = await asyncio.to_thread(self.store.write_decision, prop.id, decision)
         self.record_accepted(disposition)
@@ -448,7 +480,12 @@ class ReconciliationOperation(Operation):
             self.config.schedule.telemetry_seconds,
             prop.forecast.adapter,
         )
-        if forecast < 0.1 or actual < 0 or completeness < 0.95:
+        if (
+            not all(math.isfinite(v) for v in (forecast, actual, completeness))
+            or forecast < 0.1
+            or actual < 0
+            or completeness < 0.95
+        ):
             raise RuntimeError("daily data is incomplete")
         ratio = actual / forecast
         existing = await asyncio.to_thread(self.store.recent_daily_ratios, prop.id)

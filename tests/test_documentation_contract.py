@@ -13,6 +13,23 @@ ROOT = Path(__file__).parents[1]
 GUIDE = ROOT / "docs" / "setup-and-credentials.md"
 
 
+def test_worker_secret_files_are_ignored_but_examples_are_trackable() -> None:
+    private_names = [".env", ".env.production", "telemetry.env", "forecast-plan.env"]
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--stdin"],
+        cwd=ROOT, input="\n".join(private_names) + "\n", text=True,
+        capture_output=True, check=True,
+    )
+    assert result.stdout.splitlines() == private_names
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "--stdin"], cwd=ROOT,
+        input=".env.example\ndeployment/environment/telemetry.env.example\n",
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 1
+    assert not result.stdout
+
+
 def test_operator_guide_preserves_runtime_and_secret_boundaries() -> None:
     guide = GUIDE.read_text(encoding="utf-8")
     prose = " ".join(guide.split())
@@ -61,7 +78,8 @@ def test_operator_guide_documents_exact_influx_grants_and_provider_limits() -> N
     assert "Do not request **Control**" in prose
     assert "AppSecret" in guide and "only once" in guide
     assert "does not use an Octopus API key" in prose
-    assert "interval longer than two hours" in guide
+    assert "6-hour, 18-hour and open-ended rates" in guide
+    assert "influxdb.allow_insecure_http" in guide
     assert "public non-commercial API does not require an API key" in prose
     for hostname in [
         "openapi-eu.sigencloud.com",

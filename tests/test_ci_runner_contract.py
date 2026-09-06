@@ -56,6 +56,10 @@ def test_proxy_policy_denies_private_destinations_and_allows_only_github() -> No
     proxy_build = (RUNNER / "Dockerfile.proxy").read_text(encoding="utf-8")
     assert "squid -k parse -f /etc/squid/squid.conf" in proxy_build
     assert "HEALTHCHECK" in proxy_build
+    # Manager HTTP requests are intentionally denied by the CONNECT-only ACL.
+    # Liveness must not require weakening that ACL; full egress has its own gate.
+    assert '["squid", "-k", "check", "-f", "/etc/squid/squid.conf"]' in proxy_build
+    assert "mgr:info" not in proxy_build
 
 
 def test_root_supervisor_uses_encrypted_app_credential_and_one_job_jit() -> None:

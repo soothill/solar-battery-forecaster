@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tracemalloc
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,44 @@ def enqueue(
         max_timestamp=at,
         payload=payload,
     )
+
+
+@pytest.mark.parametrize("reserve", [1_048_576, 2_097_152, 4_194_304])
+def test_collection_reserve_is_independent_of_record_size(tmp_path, reserve):
+    state = tmp_path / "state"
+    if reserve < 2_097_152:
+        with pytest.raises(ValidationError, match="cover one maximum record"):
+            config(state, collection_reserve_bytes=reserve)
+        return
+    outbox = DurableOutbox(state, config(state, collection_reserve_bytes=reserve), "telemetry")
+    outbox.admit_collection("home")
+    with pytest.raises(OutboxFullError, match="record size"):
+        enqueue(outbox, "home", "large", b"x" * (outbox.config.max_record_bytes + 1))
+    outbox.close()
+
+
+def test_near_capacity_restart_verification_has_bounded_python_memory(tmp_path):
+    state = tmp_path / "state"
+    settings = config(state)
+    outbox = DurableOutbox(state, settings, "telemetry")
+    for index in range(110):
+        enqueue(outbox, f"home-{index % 10}", str(index), b"m field=1 " + b"x" * 1_048_566)
+    outbox.close()
+    tracemalloc.start()
+    try:
+        reopened = DurableOutbox(state, settings, "telemetry")
+        assert reopened.status().pending_records == 110
+        delivered = 0
+        while reopened.status().pending_records:
+            batch = reopened.drain(lambda bucket, org, payload: None, force=True)
+            assert batch > 0
+            delivered += batch
+        assert delivered == 110
+        _, peak = tracemalloc.get_traced_memory()
+        assert peak < 8 * 1_048_576
+        reopened.close()
+    finally:
+        tracemalloc.stop()
 
 
 def test_fallback_commit_precedes_replay_and_ambiguous_failure_replays_whole_record(

@@ -1,5 +1,10 @@
 # Isolated CI runner on `ic-dev`
 
+This is a gated design, not a claim that a runner is installed or active. A single human owner
+can remain the final Reviewer, but agent role separation is procedural until the GitHub identities,
+checks and protections described here enforce it. See the
+[production readiness checklist](production-readiness.md) for the sole-maintainer constraints.
+
 Ordinary CI is anchored to protected `main` with `pull_request_target`. The exact immutable event
 origin permits `quality-run` only for same-repository heads; that sequential untrusted-code job runs
 on `ic-dev`, `solar-public-ci`, `isolated`, `ephemeral`, `no-private-net` and has only
@@ -77,6 +82,11 @@ derives that identity from `REPOSITORY` and rejects a personal owner, the defaul
 repositories or workflows, and any visibility other than `selected`.
 
 ## Installation and acceptance
+
+The proxy container health check uses `squid -k check` for process liveness, as documented by
+[Squid](https://wiki.squid-cache.org/SquidFaq/InstallingSquid). It does not make an HTTP manager
+request that the CONNECT-only policy denies. Liveness alone does not prove networking or isolation:
+the full `accept-host.sh` egress and cleanup checks below are still mandatory before activation.
 
 Required host packages are Docker Engine with AppArmor and the default seccomp profile, systemd,
 iptables with `DOCKER-USER`, Python 3, jq, OpenSSL, and a current GitHub CLI. Docker access remains
