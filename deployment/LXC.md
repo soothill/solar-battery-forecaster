@@ -1,8 +1,9 @@
 # Debian LXC deployment
 
-Use an unprivileged Debian 12 LXC with one vCPU, at least 512 MB RAM and 4 GB disk, accurate time,
-controlled outbound HTTPS, and network access to the dedicated InfluxDB endpoint. Prefer 1 GB RAM and
-8 GB disk for operational headroom or a co-located authenticated Nginx proxy. Do not expose the
+Use an unprivileged Debian 12 LXC with one vCPU, accurate time, controlled outbound HTTPS, and
+network access to the dedicated InfluxDB endpoint. The 512 MB RAM/4 GB disk sizing is an unverified
+minimum baseline derived from service limits; use the live-tested/recommended 1 GB RAM/8 GB disk
+baseline for operational headroom or a co-located authenticated Nginx proxy. Do not expose the
 collector publicly. For the complete operator journey and provider credential onboarding, read
 [`docs/setup-and-credentials.md`](../docs/setup-and-credentials.md); this file remains the canonical
 hardened release and service installation reference.
@@ -66,7 +67,7 @@ a build backend or resolves `build-system.requires`.
 
 ```bash
 apt-get update
-apt-get install -y ca-certificates python3 python3-venv
+apt-get install -y ca-certificates python3 python3-venv util-linux
 groupadd --system solar-config
 groupadd --system solar-observe
 for identity in solar-telemetry solar-tariff solar-forecast-plan solar-reconciliation; do
@@ -108,6 +109,7 @@ install -o root -g solar-dashboard -m 0640 \
 chown root:solar-config /etc/solar-battery-forecaster/config.yaml
 chmod 0640 /etc/solar-battery-forecaster/config.yaml
 cp /opt/solar-battery-forecaster/deployment/*.service /etc/systemd/system/
+cp /opt/solar-battery-forecaster/deployment/maintenance/*.service /etc/systemd/system/
 install -o root -g root -m 0644 \
   /opt/solar-battery-forecaster/deployment/solar-battery-status.tmpfiles \
   /etc/tmpfiles.d/solar-battery-status.conf
@@ -119,21 +121,22 @@ The shared application tree is readable and executable by `solar-config` members
 not group-writable. Only root may replace installed code or the virtual environment.
 
 Edit the shared non-secret configuration and five service-private environment files. Each process
-resolves only its own token and provider secrets. Validate one scope as that service identity,
-without loading any other scope's environment:
+resolves only its own token and provider secrets. The installed validation template uses systemd's
+`EnvironmentFile=` parser and direct process execution; it never interprets the secret file as
+shell code. Validate every scope as its matching identity:
 
 ```bash
-sudo -u solar-telemetry sh -c '
-  set -a
-  . /etc/solar-battery-forecaster/telemetry.env
-  set +a
-  exec /opt/solar-battery-forecaster/.venv/bin/solar-battery-forecaster \
-    validate --scope telemetry --config /etc/solar-battery-forecaster/config.yaml
-'
+for scope in telemetry tariff forecast-plan reconciliation dashboard; do
+  systemctl start "solar-battery-validate@$scope.service"
+  systemctl show "solar-battery-validate@$scope.service" \
+    --property=Result --property=ExecMainStatus --no-pager
+done
 ```
 
-Repeat using the matching identity, environment file, and scope for `tariff`, `forecast-plan`,
-`reconciliation`, and `dashboard`.
+Every instance must report `Result=success` and `ExecMainStatus=0`. This checks configuration and
+InfluxDB health, not provider access or exact bucket grants. Maintenance templates are root-owned,
+non-enabled, hardened one-shot units; only an administrator starts them. Never source an
+`EnvironmentFile` in a shell because provider values are data, not trusted shell syntax.
 
 Before starting services, verify Unix read isolation without printing any secret values:
 
@@ -141,11 +144,11 @@ Before starting services, verify Unix read isolation without printing any secret
 check_isolation() {
   identity="$1"
   own="$2"
-  sudo -u "$identity" test -r /etc/solar-battery-forecaster/config.yaml
-  sudo -u "$identity" test -r "/etc/solar-battery-forecaster/$own.env"
+  runuser -u "$identity" -- test -r /etc/solar-battery-forecaster/config.yaml
+  runuser -u "$identity" -- test -r "/etc/solar-battery-forecaster/$own.env"
   for peer in telemetry tariff forecast-plan reconciliation dashboard; do
     if [ "$peer" != "$own" ]; then
-      sudo -u "$identity" test ! -r "/etc/solar-battery-forecaster/$peer.env"
+      runuser -u "$identity" -- test ! -r "/etc/solar-battery-forecaster/$peer.env"
     fi
   done
 }
@@ -207,20 +210,20 @@ collection-reserve, and filesystem-free-space limits can be maintained. There is
 expiry or eviction. Alert on a nonzero pending count, any quarantine/blocked stream, repeated
 delivery failures, or declining free space. An empty SQLite schema/control database can exist while
 the worker is healthy, but confirmed direct writes create no payload rows. The dashboard deliberately
-cannot read peer-private state and displays only confirmed InfluxDB freshness; this scoped command is
-authoritative for local backlog. Inspect a writer as its own identity without exposing a peer token:
+cannot read peer-private state and displays only confirmed InfluxDB freshness. Stop the matching
+writer before a maintenance action that can modify its database. Read scoped status through the
+non-enabled one-shot unit without exposing a peer token:
 
 ```bash
-sudo -u solar-telemetry sh -c '
-  set -a
-  . /etc/solar-battery-forecaster/telemetry.env
-  set +a
-  exec /opt/solar-battery-forecaster/.venv/bin/solar-battery-forecaster \
-    outbox status --scope telemetry --config /etc/solar-battery-forecaster/config.yaml
-'
+systemctl start solar-battery-outbox-status@telemetry.service
+journalctl -u solar-battery-outbox-status@telemetry.service -o cat --no-pager \
+  | grep '^{' | tail -n 1
 ```
 
-The other actions are `verify`, `drain`, `retry`, and `export-quarantine --output NEW_PATH`.
+Installed templates also provide `solar-battery-outbox-verify@SCOPE.service` and
+`solar-battery-outbox-drain@SCOPE.service`. The application additionally supports `retry` and
+`export-quarantine --output NEW_PATH`; those exceptional actions require a separately reviewed,
+direct-execution maintenance unit rather than shell-loading the secret file.
 `drain` deliberately bypasses the current retry timer but keeps record/byte limits. `retry` resets
 network-delivery attempts; it does not release checksum quarantine. Exports contain exact line
 protocol and property identifiers, are created mode 0600, and must be encrypted and access-limited
@@ -239,7 +242,8 @@ and disappear when `/run` is recreated.
 
 Remote syslog is disabled by default. To enable it, set `observability.syslog.enabled: true` and
 configure the host, port, and `udp`, `tcp`, or `tls` transport. TLS uses the system CA store and
-verifies the destination certificate. Permit only the selected destination in the LXC firewall.
+verifies its chain and hostname against the configured `host`. Version 0.1 does not present a client
+certificate and therefore does not support mTLS. Permit only the selected destination in the LXC firewall.
 Forwarding has a bounded queue and retry backoff: loss, delay, or overflow is reported in status but
 never changes collection success. Only fixed, allowlisted structured events are sent; arbitrary
 application log messages remain in journald. Status and syslog events never contain property IDs,
@@ -258,8 +262,9 @@ dashboard concurrency show sustained `MemoryCurrent` close to a ceiling.
 
 ## Upgrade and rollback
 
-Stop only the service being upgraded, run `outbox verify` as that identity, and back up its database
-plus WAL/SHM sidecars while stopped. Verify the new release artifacts, install the new wheel with the
+Stop only the service being upgraded, start its
+`solar-battery-outbox-verify@SCOPE.service` unit, and back up its database plus WAL/SHM sidecars
+while stopped. Verify the new release artifacts, install the new wheel with the
 same `--no-deps --no-build-isolation` command, and restart it. Roll back only to a verified wheel
 whose documented outbox schema supports the on-disk `PRAGMA user_version`; preserve the complete
 state directory throughout. Version 0.1 uses schema 1 and fails closed on unknown versions rather

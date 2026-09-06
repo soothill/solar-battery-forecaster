@@ -83,20 +83,13 @@ pip install -e .
 cp config.example.yaml config.yaml
 ```
 
-Edit `config.yaml`, copy the relevant example from `deployment/environment/`, and load only the
-environment for the command being run. For example, validate the telemetry scope:
+Edit `config.yaml` and copy the relevant examples from `deployment/environment/`. Do not shell-load
+these files: provider values are data and can contain shell metacharacters. The hardened LXC
+installation uses systemd `EnvironmentFile=` directives and direct process execution. For real
+credentials and scoped validation, follow the [Setup and credentials guide](docs/setup-and-credentials.md).
 
 ```bash
 cp deployment/environment/telemetry.env.example telemetry.env
-# Edit telemetry.env, then load only this worker's environment.
-set -a
-. ./telemetry.env
-set +a
-solar-battery-forecaster validate --scope telemetry --config config.yaml
-solar-battery-forecaster telemetry --config config.yaml --once
-solar-battery-forecaster tariff --config config.yaml --once
-solar-battery-forecaster forecast-plan --config config.yaml --once
-solar-battery-forecaster reconciliation --config config.yaml --once
 ```
 
 For continuous operation, run each command without `--once` in its own process. The supplied

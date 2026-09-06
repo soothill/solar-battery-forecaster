@@ -70,3 +70,7 @@
   validation and rotation, labels all executable examples by host context, and uses documentation
   contract tests to keep ports, token grants, fallback semantics and current provider limitations
   aligned with the implementation.
+- 2026-09-06: Service environment files must never be dot-sourced or otherwise interpreted by a
+  shell. Administrative validation, one-shot collection and outbox checks use non-enabled,
+  root-owned systemd templates with `EnvironmentFile=` and direct `ExecStart`; contract tests bind
+  those exact CLI arguments and prevent documentation from reintroducing shell sourcing.

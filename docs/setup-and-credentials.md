@@ -57,16 +57,20 @@ the dashboard intentionally shows only data confirmed in InfluxDB.
 Create the following inventory in your password manager. The table describes current version 0.1
 behavior, not planned integrations.
 
-| Input | Authoritative source | Secret? | Network destination | Minimum privilege | How to validate | Rotation |
-|---|---|---:|---|---|---|---|
-| Sigenergy AppKey | Sigenergy developer portal | Yes | Selected regional `openapi-*.sigencloud.com` host | Approved **Monitoring** application only; no Control or VPP dispatch | Run telemetry once and confirm a new `energy_telemetry` point | Create/rotate in the portal, update only `telemetry.env`, test, then retire the old credential if the portal permits overlap |
-| Sigenergy AppSecret | Shown once when generated in the developer portal | Yes | Same as AppKey | Same Monitoring application | Same telemetry test | Store immediately; schedule a maintenance window if regeneration invalidates the old secret immediately |
-| Sigenergy system ID | Authorized system/site shown by the portal or returned by its documented system API | Treat as sensitive | Same as AppKey | Only the authorized property | Same telemetry test | Replace if the installation/system identity changes |
-| Octopus product and tariff codes | Property's Octopus account/contract and public product API | No, but account context is private | `api.octopus.energy:443` | Public standard-unit-rate endpoint | Run tariff once and confirm `electricity_tariff` points with expected dates/prices | Recheck whenever the tariff changes |
-| Octopus account API key | Octopus account Developer settings | Yes | Not used by version 0.1 | Do not install it for the current REST adapter | Not applicable | Manage in the Octopus account when a future authenticated adapter explicitly requires it |
-| Open-Meteo forecast | Public non-commercial API | No key in version 0.1 | `api.open-meteo.com:443` | Public forecast endpoint | Run forecast-plan when due and confirm a complete `pv_forecast` snapshot | Not applicable |
-| Five InfluxDB custom tokens | Existing InfluxDB OSS 2.x administrator | Yes | Your InfluxDB HTTPS endpoint | Exact bucket grants listed below | Validate each scope, then prove read/write grants with its one-shot service test | Replace one service token at a time, verify, then revoke the old token |
-| Syslog destination | Your log-platform administrator | Hostname is not a secret; trust material may be sensitive | Configured UDP/TCP/TLS host and port | Receive only fixed operational event codes | Induce a non-sensitive test event and confirm receipt | Follow the log platform's certificate/trust rotation process |
+| Input | Exact file and variable | Authoritative source | Secret? | Network destination | Minimum privilege | How to validate | Rotation |
+|---|---|---|---:|---|---|---|---|
+| Sigenergy AppKey | `telemetry.env`: `SIGENERGY_HOME_APP_KEY` | Sigenergy developer portal | Yes | Selected regional `openapi-*.sigencloud.com` host | Approved **Monitoring** application only; no Control or VPP dispatch | Run telemetry once and confirm a new `energy_telemetry` point | Create/rotate in the portal, update only `telemetry.env`, test, then retire the old credential if the portal permits overlap |
+| Sigenergy AppSecret | `telemetry.env`: `SIGENERGY_HOME_APP_SECRET` | Shown once when generated in the developer portal | Yes | Same as AppKey | Same Monitoring application | Same telemetry test | Store immediately; schedule a maintenance window if regeneration invalidates the old secret immediately |
+| Sigenergy system ID | `telemetry.env`: `SIGENERGY_HOME_SYSTEM_ID` | Authorized system/site shown by the portal or returned by its documented system API | Treat as sensitive | Same as AppKey | Only the authorized property | Same telemetry test | Replace if the installation/system identity changes |
+| Octopus product and tariff codes | `config.yaml`: `product_code`, `tariff_code` | Property's Octopus account/contract and public product API | No, but account context is private | `api.octopus.energy:443` | Public standard-unit-rate endpoint | Run tariff once and confirm `electricity_tariff` points with expected dates/prices | Recheck whenever the tariff changes |
+| Octopus account API key | No version 0.1 variable or file | Octopus account Developer settings | Yes | Not used by version 0.1 | Do not install it for the current REST adapter | Not applicable | Manage in the Octopus account when a future authenticated adapter explicitly requires it |
+| Open-Meteo forecast | No version 0.1 variable or file | Public non-commercial API | No key in version 0.1 | `api.open-meteo.com:443` | Public forecast endpoint | Run forecast-plan when due and confirm a complete `pv_forecast` snapshot | Not applicable |
+| Telemetry Influx token | `telemetry.env`: `INFLUX_TELEMETRY_TOKEN` | InfluxDB administrator | Yes | Configured InfluxDB HTTPS endpoint | Write `solar_telemetry` only | Validate scope, run telemetry and confirm a point | Replace, test this service, then revoke old token |
+| Tariff Influx token | `tariff.env`: `INFLUX_TARIFF_TOKEN` | InfluxDB administrator | Yes | Configured InfluxDB HTTPS endpoint | Write `solar_tariff` only | Validate scope, run tariff and confirm points | Replace, test this service, then revoke old token |
+| Forecast-plan Influx token | `forecast-plan.env`: `INFLUX_FORECAST_PLAN_TOKEN` | InfluxDB administrator | Yes | Configured InfluxDB HTTPS endpoint | Read all three buckets; write `solar_planning` | Validate scope, run a due plan and confirm snapshot/decision | Replace, test this service, then revoke old token |
+| Reconciliation Influx token | `reconciliation.env`: `INFLUX_RECONCILIATION_TOKEN` | InfluxDB administrator | Yes | Configured InfluxDB HTTPS endpoint | Read telemetry/planning; write planning | Validate scope, run due reconciliation and confirm `pv_daily` | Replace, test this service, then revoke old token |
+| Dashboard Influx token | `dashboard.env`: `INFLUX_DASHBOARD_TOKEN` | InfluxDB administrator | Yes | Configured InfluxDB HTTPS endpoint | Read all three buckets only | Validate scope and load dashboard data | Replace, test this service, then revoke old token |
+| Syslog destination | `config.yaml`: `observability.syslog.*` (no credential variable) | Your log-platform administrator | Hostname is not a secret; CA/trust material may be sensitive | Configured UDP/TCP/TLS host and port | Receive only fixed operational event codes | Induce a non-sensitive test event and confirm receipt | Follow the log platform's certificate/trust rotation process |
 
 The `validate` command checks configuration loading and InfluxDB health. It does **not** prove
 provider authentication or that a token has every required bucket grant. The one-shot and record
@@ -147,14 +151,15 @@ planes across all properties.
 
 ## 4. Prepare InfluxDB OSS 2.x
 
-This application targets InfluxDB OSS 2.x. Confirm the existing server version and health before
-creating resources.
+This application targets InfluxDB OSS 2.x. The `influx version` command reports the local CLI
+version, not the server version. The unauthenticated server health response reports the actual
+server version; confirm that its JSON `version` value starts with `2.` before creating resources.
 
-**Run on the InfluxDB host or an administrator workstation with the Influx CLI configured:**
+**Run on an administrator workstation with the Influx CLI configured; the first command is client-only and the second queries the server:**
 
 ```bash
 influx version
-influx ping --host https://influxdb.example.invalid:8086
+curl --fail --silent --show-error https://influxdb.example.invalid:8086/health
 ```
 
 Create three distinct buckets. Select retention periods that match your privacy and forecasting
@@ -162,7 +167,17 @@ needs; reconciliation needs enough telemetry and planning history to learn usefu
 official references are [Create a bucket](https://docs.influxdata.com/influxdb/v2/admin/buckets/create-bucket/)
 and [Create a custom API token](https://docs.influxdata.com/influxdb/v2/admin/tokens/create-token/).
 
-**Run on the InfluxDB administrator workstation; replace every uppercase placeholder first:**
+`config.yaml` takes the organization **name** and the three bucket **names**. The authorization
+commands below instead take immutable organization and bucket **IDs**. Obtain them from the
+administrator CLI; do not paste an ID into a name field or infer an ID from a name.
+
+**Run on the InfluxDB administrator workstation; replace the organization name, then record the returned organization ID:**
+
+```bash
+influx org list --name ORG_NAME
+```
+
+**Run on the InfluxDB administrator workstation; replace every uppercase ID/duration placeholder first:**
 
 ```bash
 influx bucket create --org-id ORG_ID --name solar_telemetry --retention RETENTION_DURATION
@@ -171,7 +186,9 @@ influx bucket create --org-id ORG_ID --name solar_planning --retention RETENTION
 influx bucket list --org-id ORG_ID
 ```
 
-Record the three bucket IDs from the list. Create five different custom tokens with the exact
+Record the three bucket IDs from the list. Keep `ORG_NAME`, `solar_telemetry`, `solar_tariff`, and
+`solar_planning` as names in `config.yaml`; use only the recorded IDs in the CLI commands. Create
+five different custom tokens with the exact
 grants below. Only an Influx identity allowed to create authorizations can do this. Token values are
 shown when created and may not be retrievable later, so run this in a private terminal and capture
 each result directly into the password manager. Never use an operator/all-access token in a
@@ -208,8 +225,10 @@ system trust store; never disable certificate verification.
 
 ## 5. Create the Proxmox LXC
 
-The minimum tested sizing is one vCPU, 512 MB RAM, and 4 GB disk. Use one vCPU, 1 GB RAM, and 8 GB
-disk for operational headroom and for the co-located Nginx proxy described below. Increase disk
+The unverified minimum baseline is one vCPU, 512 MB RAM, and 4 GB disk. It is derived from the
+service limits but has not completed a live LXC soak. Use the live-tested/recommended baseline of
+one vCPU, 1 GB RAM, and 8 GB disk for operational headroom and for the co-located Nginx proxy
+described below. Increase disk
 space if the configured outbox limits plus OS logs and upgrades cannot fit above the filesystem
 reserve.
 
@@ -234,7 +253,7 @@ equivalent command-line management operations.
 ```bash
 apt-get update
 apt-get upgrade
-apt-get install ca-certificates curl python3 python3-venv
+apt-get install ca-certificates curl python3 python3-venv util-linux
 timedatectl status
 getent hosts api.open-meteo.com api.octopus.energy
 ```
@@ -266,6 +285,129 @@ Edit `/etc/solar-battery-forecaster/config.yaml` as root. For every property:
 
 The repository's sample 6 kW inverter, 9 kWh battery, coordinates, identifiers and tariff codes are
 fictional/illustrative. Copy the file and replace them; never commit the real copy.
+
+### Complete configuration reference
+
+All accepted scalar fields in `config.example.yaml` are listed below. Ranges are enforced at
+configuration load unless the text says "operational rule". Bytes are integer bytes; seconds,
+minutes, hours, watts, kilowatts (kW), kilowatt-hours (kWh), and percentages use the units named in
+the field. Safe examples are fictional and must be replaced or reviewed. HTTP, outbox and schedule
+scalars are non-secret operational settings; their authoritative sources are the enforced
+implementation bounds plus the provider limits, outage objective, capacity evidence or operator
+policy named in each row. The configuration as a whole remains private because other sections hold
+property location and infrastructure metadata.
+
+| Influx field | Units/range or enum | Privacy and authoritative source | Safe example |
+|---|---|---|---|
+| `influxdb.url` | Required URL; HTTPS is an operational rule across a network boundary | Private infrastructure; Influx administrator | `https://influxdb.example.invalid:8086` |
+| `influxdb.org` | Required organization **name**, not ID | Private tenant metadata; `influx org list`/administrator | `example-org` |
+| `telemetry_bucket` | Non-empty name; all three bucket names must differ | Private infrastructure; Influx administrator | `solar_telemetry` |
+| `tariff_bucket` | Non-empty, distinct bucket name | Private infrastructure; Influx administrator | `solar_tariff` |
+| `planning_bucket` | Non-empty, distinct bucket name | Private infrastructure; Influx administrator | `solar_planning` |
+| `tokens.telemetry` | Fixed environment placeholder | Secret; matching custom authorization | `${INFLUX_TELEMETRY_TOKEN}` |
+| `tokens.tariff` | Fixed environment placeholder | Secret; matching custom authorization | `${INFLUX_TARIFF_TOKEN}` |
+| `tokens.forecast-plan` | Fixed environment placeholder | Secret; matching custom authorization | `${INFLUX_FORECAST_PLAN_TOKEN}` |
+| `tokens.reconciliation` | Fixed environment placeholder | Secret; matching custom authorization | `${INFLUX_RECONCILIATION_TOKEN}` |
+| `tokens.dashboard` | Fixed environment placeholder | Secret; matching read-only authorization | `${INFLUX_DASHBOARD_TOKEN}` |
+
+| HTTP field | Units/range | Purpose/source | Safe example |
+|---|---|---|---|
+| `minimum_spacing_seconds` | 0–60 seconds | Minimum serialized provider-call spacing; use the strictest provider limit divided across configured work | `0.5` |
+| `max_response_bytes` | 16,384–8,388,608 bytes | Maximum decompressed provider JSON; raise only for a measured, reviewed need | `1048576` |
+| `max_attempts` | 1–10 attempts | Total bounded HTTP attempts | `3` |
+| `retry_base_seconds` | 0.1–60 seconds | First ordinary backoff delay | `1` |
+| `retry_max_seconds` | 1–300 seconds | Maximum ordinary backoff delay; operationally keep at least the base | `30` |
+| `retry_after_max_seconds` | 1–3,600 seconds | Longest provider `Retry-After` handled inline; longer values defer the next cycle | `300` |
+| `jitter_seconds` | 0–10 seconds | Random addition that reduces synchronized requests | `0.5` |
+
+| Outbox field | Units/range | Purpose/source | Safe example |
+|---|---|---|---|
+| `state_directory` | Absolute, non-root path; required for writer scopes | Private local state; fixed per service environment, not shared YAML | `${OUTBOX_STATE_DIRECTORY}` |
+| `database_max_bytes` | 1,048,576–2,147,483,648 bytes | Per-writer SQLite maximum; size from outage objective/free disk | `134217728` |
+| `max_record_bytes` | 16,384–16,777,216 bytes | Maximum one serialized Influx batch | `2097152` |
+| `max_records` | 100–10,000,000 records | Maximum queued records; no silent eviction | `100000` |
+| `filesystem_min_free_bytes` | 16,777,216–17,179,869,184 bytes | Free-space floor below which collection stops | `268435456` |
+| `journal_headroom_bytes` | 1,048,576–268,435,456 bytes | Reserved SQLite WAL/journal space | `8388608` |
+| `collection_reserve_bytes` | 16,384–16,777,216 bytes; must cover `max_record_bytes` | Space admitted before another provider collection | `2097152` |
+| `drain_max_records` | 1–1,000 records | Maximum records per replay batch | `32` |
+| `drain_max_bytes` | 16,384–67,108,864 bytes; must cover `max_record_bytes` | Maximum bytes per replay batch | `8388608` |
+| `retry_base_seconds` | 1–300 seconds | First database-delivery retry delay | `5` |
+| `retry_max_seconds` | 1–3,600 seconds; at least base | Maximum database-delivery retry delay | `300` |
+
+`collection_reserve_bytes + journal_headroom_bytes` must not exceed `database_max_bytes`. Ensure the
+LXC disk can hold four maximum outboxes, their WAL/headroom, journald, packages, and the configured
+free-space floors; the bounds are safety rails, not a capacity recommendation.
+
+| Observability/syslog field | Units/range or enum | Privacy and authoritative source | Safe example |
+|---|---|---|---|
+| `status_directory` | Absolute, non-root path | Fixed per service environment; runtime-only sanitized projection | `${STATUS_DIRECTORY}` |
+| `heartbeat_seconds` | 10–300 seconds | Status write frequency; operator monitoring objective | `30` |
+| `stale_after_seconds` | 30–900 seconds | Dashboard stale threshold; set above heartbeat plus scheduling jitter | `90` |
+| `syslog.enabled` | `true`/`false` | Whether fixed events are forwarded; log administrator | `false` |
+| `syslog.host` | DNS name/IP, ≤253 characters, no whitespace, slash or backslash; required when enabled | Infrastructure metadata; exact TLS certificate name from log administrator | `syslog.example.invalid` |
+| `syslog.port` | 1–65,535 | Destination listener from log administrator | `6514` |
+| `syslog.transport` | `udp`, `tcp`, or `tls` | Listener protocol; use TLS outside a trusted LAN | `tls` |
+| `syslog.connect_timeout_seconds` | 0.1–30 seconds | Bounded connection timeout | `3` |
+| `syslog.queue_size` | 10–5,000 events | In-memory best-effort queue; size from outage/traffic objective | `256` |
+
+| Schedule field | Units/range | Meaning/source | Safe example |
+|---|---|---|---|
+| `telemetry_seconds` | ≥300 seconds | Collection interval; Sigenergy limits and desired resolution | `300` |
+| `telemetry_stale_after_seconds` | ≥300 seconds | Maximum telemetry age accepted by planning | `900` |
+| `tariff_minutes` | ≥30 minutes | Tariff refresh interval; Octopus limits/price publication | `360` |
+| `forecast_hour` | 0–23 local hour | Time after which tomorrow's plan becomes due | `21` |
+| `forecast_minute` | 0–59 local minute | Minute component of plan time | `30` |
+| `reconciliation_hour` | 0–23 local hour | Local daily reconciliation hour | `0` |
+| `reconciliation_minute` | 0–59 local minute | Minute component of reconciliation time | `15` |
+| `worker_scan_seconds` | ≥10 seconds | Due-job scan interval | `60` |
+| `property_phase_seconds` | 0–60 seconds | Delay between properties to avoid request bursts | `2` |
+| `reconciliation_catch_up_days` | 1–30 days | Missing past local days checked after downtime | `7` |
+
+| Property/array field | Units/range or enum | Privacy and authoritative source | Safe example |
+|---|---|---|---|
+| `id` | Unique lowercase alias matching `[a-z0-9][a-z0-9_-]+` | Non-identifying operator alias; never address/account/serial | `home-01` |
+| `timezone` | IANA time-zone name (operationally validated when used) | Property locale; IANA/operator | `Europe/London` |
+| `latitude` | −90–90 degrees | Sensitive location; verified mapping/site survey | `0.0` (non-property placeholder) |
+| `longitude` | −180–180 degrees | Sensitive location; verified mapping/site survey | `0.0` (non-property placeholder) |
+| `arrays[].name` | Required text | Non-sensitive descriptive alias; installation plan | `south-roof` |
+| `arrays[].panel_count` | Integer >0 | Installation plan/inverter portal | `10` |
+| `arrays[].panel_power_w` | >0 watts per panel | Panel datasheet | `440` |
+| `arrays[].tilt_degrees` | 0–90 degrees from horizontal | Roof survey/installer drawing | `35` |
+| `arrays[].azimuth_degrees` | 0≤value<360; north 0°, east 90°, south 180°, west 270° | Roof survey/verified map | `180` |
+| `arrays[].performance_ratio` | >0–1 | Commissioning/history estimate; begin conservatively | `0.84` |
+
+| Equipment/planning field | Units/range or enum | Privacy and authoritative source | Safe example |
+|---|---|---|---|
+| `inverter.adapter` | Current enum in practice: `sigenergy_cloud` | Adapter selected by installed release | `sigenergy_cloud` |
+| `inverter.rated_power_kw` | >0 kW | Inverter datasheet/commissioning record | `6.0` |
+| `inverter.region` | `eu`, `ap`, `mea`, `cn`, `anz`, `la`, `na`, or `jp` | Sigenergy property region/portal | `eu` |
+| `inverter.app_key` | Environment placeholder | Secret AppKey from portal | `${SIGENERGY_HOME_APP_KEY}` |
+| `inverter.app_secret` | Environment placeholder | Secret one-time AppSecret from portal | `${SIGENERGY_HOME_APP_SECRET}` |
+| `inverter.system_id` | Environment placeholder | Sensitive authorized system ID, not serial | `${SIGENERGY_HOME_SYSTEM_ID}` |
+| `battery.usable_capacity_kwh` | >0 kWh | Battery datasheet/current commissioning configuration | `9.0` |
+| `battery.minimum_soc_percent` | 0–100%, strictly below maximum | Installer/manufacturer reserve policy | `10` |
+| `battery.maximum_soc_percent` | 0–100%, strictly above minimum | Installer/manufacturer operating policy | `100` |
+| `battery.reserve_kwh` | ≥0 kWh; operationally no more than usable capacity | Owner resilience policy | `1.0` |
+| `battery.max_charge_power_kw` | >0 kW | Inverter/battery/grid constraint | `6.0` |
+| `battery.charge_efficiency` | >0–1 | Datasheet or measured commissioning value | `0.94` |
+| `forecast.adapter` | Current enum in practice: `open_meteo` | Adapter selected by installed release | `open_meteo` |
+| `forecast.initial_correction_factor` | 0.25–2 | Start at neutral until daily history exists | `1.0` |
+| `forecast.conservative_multiplier` | >0–1 | Owner risk tolerance; lower is more conservative | `0.80` |
+| `load.expected_kwh_until_next_cheap_window` | ≥0 kWh | Bill/meter history until learned load exists | `8.0` |
+| `tariff.adapter` | Current enum in practice: `octopus` | Adapter selected by installed release | `octopus` |
+| `tariff.product_code` | Required exact text | Property's Octopus account/public product API | `EXAMPLE-PRODUCT` |
+| `tariff.tariff_code` | Required exact text | Property's Octopus account/public product API | `E-1R-EXAMPLE-A` |
+| `tariff.cheap_rate_threshold_pence` | ≥−100 pence/kWh including VAT | Owner's charging policy/current contract | `10.0` |
+| `tariff.stale_after_minutes` | 30–2,880 minutes | Maximum tariff age allowed by planning | `480` |
+
+The YAML objects `influxdb`, `http`, `outbox`, `observability`, `schedule`, `inverter`, `battery`,
+`forecast`, `load`, `tariff`, and `syslog` are structural mappings rather than scalar settings.
+`properties` and each property's `arrays` are repeated lists: add one complete property object per
+site and one array object per distinct roof plane. The five keys under `tokens` and the service
+environment filenames are fixed process scopes, not user-defined names. Array kWp, issued snapshot
+IDs, corrected forecasts, status fields, measurements and learned factors are derived/runtime
+values and must not be added to `config.yaml`. Unknown fields are rejected in security-sensitive
+global sections; adapter-specific models may also reject unsupported adapter names at runtime.
 
 Put secrets in only the matching root-owned mode-0640 environment file:
 
@@ -309,44 +451,49 @@ credentials, property IDs, coordinates, provider payloads, or SQLite contents.
 
 In `config.yaml`, set `observability.syslog.enabled: true`, the exact host and port, and one of
 `udp`, `tcp`, or `tls`. Prefer certificate-verified `tls` outside a trusted LAN and install the
-issuing CA in the LXC trust store. Permit only that destination through the firewall. Collection
+issuing CA in the LXC trust store. TLS validates both the certificate chain and the configured
+`host` as the server name, so configure the DNS name present in the certificate rather than an IP
+address unless the certificate has that IP in its subject alternative names. Version 0.1 does not
+load a client certificate and does not support mutual TLS (mTLS); place an approved relay in front
+of an mTLS-only collector. Permit only that destination through the firewall. Collection
 continues if syslog is slow or unavailable; queue loss/failure appears in the status view.
 
 ## 10. Validate and start all five services
 
 First run scoped configuration/Influx health validation under each service identity. This proves
 that the relevant environment can load and the Influx endpoint responds, but not provider access
-or exact bucket grants.
+or exact bucket grants. The checked-in maintenance templates use systemd `EnvironmentFile=` and
+execute the application directly as `solar-SCOPE`; they never interpret a secret file as shell
+code. They are not enabled at boot.
 
-**Run inside the LXC as root; repeat with each matching identity, file and scope:**
+**Run inside the LXC as root:**
 
 ```bash
-sudo -u solar-telemetry sh -c '
-  set -a
-  . /etc/solar-battery-forecaster/telemetry.env
-  set +a
-  exec /opt/solar-battery-forecaster/.venv/bin/solar-battery-forecaster \
-    validate --scope telemetry --config /etc/solar-battery-forecaster/config.yaml
-'
+for scope in telemetry tariff forecast-plan reconciliation dashboard; do
+  systemctl start "solar-battery-validate@$scope.service"
+  systemctl show "solar-battery-validate@$scope.service" \
+    --property=Result --property=ExecMainStatus --no-pager
+done
 ```
 
+Every instance must show `Result=success` and `ExecMainStatus=0`. Never source an environment file;
+systemd environment-file syntax is data syntax and values may contain shell metacharacters.
+
 Run live one-shot telemetry and tariff collection. These calls contact the real providers and can
-write to InfluxDB or, on write failure, to the fallback outbox.
+write to InfluxDB or, on write failure, to the fallback outbox. Stop the corresponding continuous
+unit first so two processes never operate on the same outbox.
 
 **Run inside the LXC as root during the acceptance window:**
 
 ```bash
-sudo -u solar-telemetry sh -c '
-  set -a; . /etc/solar-battery-forecaster/telemetry.env; set +a
-  exec /opt/solar-battery-forecaster/.venv/bin/solar-battery-forecaster \
-    telemetry --config /etc/solar-battery-forecaster/config.yaml --once
-'
-sudo -u solar-tariff sh -c '
-  set -a; . /etc/solar-battery-forecaster/tariff.env; set +a
-  exec /opt/solar-battery-forecaster/.venv/bin/solar-battery-forecaster \
-    tariff --config /etc/solar-battery-forecaster/config.yaml --once
-'
+systemctl stop solar-battery-telemetry solar-battery-tariff
+systemctl start solar-battery-once@telemetry.service
+systemctl start solar-battery-once@tariff.service
+systemctl show solar-battery-once@telemetry.service solar-battery-once@tariff.service \
+  --property=Result --property=ExecMainStatus --no-pager
 ```
+
+Both instances must show `Result=success` and `ExecMainStatus=0`.
 
 Confirm new, plausible, correctly timestamped `energy_telemetry` and `electricity_tariff` records
 in InfluxDB. A zero exit alone is insufficient. Forecast planning is schedule-aware and normally
@@ -369,6 +516,168 @@ systemctl --no-pager --full status \
   solar-battery-telemetry solar-battery-tariff solar-battery-forecast-plan \
   solar-battery-reconciliation solar-battery-dashboard
 ```
+
+### Runtime and isolation acceptance
+
+Prove all units are enabled/active, no unit has a failed result or unexpected restart, and current
+memory remains below its enforced maximum. Capture the values after at least one normal collection
+cycle; `NRestarts=0` is expected for a clean acceptance run. `MemoryCurrent` may be `[not set]`
+briefly during activation, so repeat after the process is active.
+
+**Run inside the LXC as root:**
+
+```bash
+for unit in telemetry tariff forecast-plan reconciliation dashboard; do
+  service="solar-battery-$unit.service"
+  systemctl is-enabled --quiet "$service"
+  systemctl is-active --quiet "$service"
+  test "$(systemctl show "$service" --property=Result --value)" = success
+  test "$(systemctl show "$service" --property=NRestarts --value)" = 0
+  current="$(systemctl show "$service" --property=MemoryCurrent --value)"
+  maximum="$(systemctl show "$service" --property=MemoryMax --value)"
+  test "$current" -le "$maximum"
+done
+test -z "$(systemctl --failed --no-legend 'solar-battery-*')"
+```
+
+The block must exit zero. Now stop and restart each process individually and prove every peer stays
+active. This tests failure isolation; it does not simulate a crash or alter provider/network state.
+
+**Run inside the LXC as root:**
+
+```bash
+for target in telemetry tariff forecast-plan reconciliation dashboard; do
+  systemctl stop "solar-battery-$target.service"
+  test "$(systemctl is-active "solar-battery-$target.service")" = inactive
+  for peer in telemetry tariff forecast-plan reconciliation dashboard; do
+    if test "$peer" != "$target"; then
+      systemctl is-active --quiet "solar-battery-$peer.service"
+    fi
+  done
+  systemctl start "solar-battery-$target.service"
+  systemctl is-active --quiet "solar-battery-$target.service"
+done
+```
+
+The block must exit zero; all five services must end active.
+
+### Outbox permissions and healthy baseline
+
+Stop one writer before using its outbox maintenance unit. Repeat for all four writers. The
+permissions block must print nothing and exit zero; each status JSON must show zero pending,
+blocked and quarantined records before the controlled outage test.
+
+**Run inside the LXC as root:**
+
+```bash
+for worker in telemetry tariff forecast-plan reconciliation; do
+  systemctl stop "solar-battery-$worker.service"
+  state="/var/lib/solar-battery-$worker"
+  test "$(stat -c '%U:%G %a' "$state")" = "solar-$worker:solar-$worker 700"
+  test -z "$(find "$state" -maxdepth 1 -type f -perm /077 -print -quit)"
+  systemctl start "solar-battery-outbox-status@$worker.service"
+  journalctl -u "solar-battery-outbox-status@$worker.service" -o cat --no-pager \
+    | grep '^{' | tail -n 1
+  systemctl start "solar-battery-$worker.service"
+done
+```
+
+### Controlled InfluxDB fallback and replay acceptance
+
+Run this only in an authorized acceptance window. It does **not** stop, firewall, or reconfigure the
+shared InfluxDB server. It stops only this deployment's telemetry worker and gives a non-enabled
+one-shot unit a temporary private configuration whose Influx URL is the local discard port. Start
+only with a healthy telemetry outbox showing zero pending records. Record a narrow UTC test window
+and the count of distinct telemetry timestamps in it using an authorized Influx administrator CLI.
+
+**Run on the InfluxDB administrator workstation; replace the organization, property alias, and absolute UTC window:**
+
+```bash
+influx query --org ORG_NAME '
+from(bucket: "solar_telemetry")
+  |> range(start: TEST_START_UTC, stop: TEST_STOP_UTC)
+  |> filter(fn: (r) => r._measurement == "energy_telemetry" and r.property == "home-01")
+  |> keep(columns: ["_time"])
+  |> unique(column: "_time")
+  |> count(column: "_time")'
+```
+
+Record the baseline count, then create a root-owned copy of the configuration and change only its
+Influx URL to an unreachable loopback port. The `grep` output must be exactly
+`url: http://127.0.0.1:9`; it contains no credential.
+
+**Run inside the LXC as root:**
+
+```bash
+systemctl stop solar-battery-telemetry.service
+cp --preserve=mode,ownership /etc/solar-battery-forecaster/config.yaml \
+  /etc/solar-battery-forecaster/acceptance-outage.yaml
+sed -i '0,/^  url: /s#^  url: .*#  url: http://127.0.0.1:9#' \
+  /etc/solar-battery-forecaster/acceptance-outage.yaml
+grep '^  url: ' /etc/solar-battery-forecaster/acceptance-outage.yaml
+if systemctl start solar-battery-outage-test@telemetry.service; then
+  echo 'unexpected direct-write success' >&2
+  exit 1
+fi
+systemctl show solar-battery-outage-test@telemetry.service \
+  --property=Result --property=ExecMainStatus --no-pager
+systemctl start solar-battery-outbox-status@telemetry.service
+journalctl -u solar-battery-outbox-status@telemetry.service -o cat --no-pager \
+  | grep '^{' | tail -n 1
+```
+
+The outage unit must report `Result=exit-code` and `ExecMainStatus=1`: provider collection succeeded
+but the intentionally unreachable Influx destination left one undelivered record. Status must show
+pending records increased from zero to one, with no quarantine or blocked stream. Securely remove
+the exact temporary file, drain using the real configuration while the continuous writer remains
+stopped, and check the empty status.
+
+**Run inside the LXC as root:**
+
+```bash
+rm -- /etc/solar-battery-forecaster/acceptance-outage.yaml
+systemctl reset-failed solar-battery-outage-test@telemetry.service
+systemctl start solar-battery-outbox-drain@telemetry.service
+journalctl -u solar-battery-outbox-drain@telemetry.service -o cat --no-pager \
+  | grep '^delivered ' | tail -n 1
+systemctl start solar-battery-outbox-status@telemetry.service
+journalctl -u solar-battery-outbox-status@telemetry.service -o cat --no-pager \
+  | grep '^{' | tail -n 1
+systemctl start solar-battery-telemetry.service
+```
+
+Drain output must say `delivered 1 record(s)` and status must return to zero pending records. Repeat
+the earlier administrator query: the count must have increased by exactly one, demonstrating one
+confirmed Influx timestamp after replay. If any prerequisite or expected result differs, stop the
+test and investigate; do not delete, retry, or mutate the outbox manually.
+
+### Local dashboard status freshness
+
+The local API must return all five fixed service names, a current generated time, non-stale
+heartbeats, and a last cycle result for each process after one normal cycle.
+
+**Run inside the LXC as root after all services have completed a cycle:**
+
+```bash
+curl --fail --silent http://127.0.0.1:8088/api/status | python3 -c '
+import datetime, json, sys
+payload = json.load(sys.stdin)
+expected = {"telemetry", "tariff", "forecast-plan", "reconciliation", "dashboard"}
+services = payload["services"]
+assert {item["service"] for item in services} == expected
+assert all(item["stale"] is False for item in services)
+assert all(item["lifecycle"] == "running" for item in services)
+workers = [item for item in services if item["service"] != "dashboard"]
+assert all(item["last_cycle_result"] in {"success", "running"} for item in workers)
+generated = datetime.datetime.fromisoformat(payload["generated_at"])
+now = datetime.datetime.now(datetime.timezone.utc)
+assert abs((now - generated).total_seconds()) < 30
+'
+```
+
+The command must exit zero and print nothing. A dashboard heartbeat can be current before a
+schedule-aware forecast/reconciliation job becomes due; the earlier record acceptance remains a
+separate requirement.
 
 ## 11. Publish the dashboard safely
 
@@ -476,8 +785,9 @@ Back up these items through an encrypted, access-controlled system:
 - InfluxDB buckets using the existing database operator's tested backup/restore process.
 - Nginx authentication and TLS material under the organization's secret/key policy.
 
-For a consistent writer backup or upgrade, stop only that writer, run `outbox verify` as its service
-identity, and preserve `outbox.sqlite3` together with any `outbox.sqlite3-wal` and
+For a consistent writer backup or upgrade, stop only that writer, start the matching
+`solar-battery-outbox-verify@SCOPE.service` unit, and preserve `outbox.sqlite3` together with any
+`outbox.sqlite3-wal` and
 `outbox.sqlite3-shm` files. Restart it promptly. Never copy only the main SQLite file while the
 writer is active. Follow [`deployment/LXC.md`](../deployment/LXC.md#upgrade-and-rollback) for
 verified artifacts, schema compatibility, rollback and uninstall retention.
@@ -528,6 +838,10 @@ their data-handling warnings are documented in
 ## Official provider references
 
 - [Sigenergy developer portal](https://developer.sigencloud.com/)
+- [Sigenergy portal overview and account access](https://developer.sigencloud.com/user/user/manual/68)
+- [Sigenergy application creation and Monitoring purpose](https://developer.sigencloud.com/user/user/manual/69)
+- [Sigenergy application dashboard and one-time AppSecret](https://developer.sigencloud.com/user/user/manual/70)
+- [Sigenergy northbound connection process](https://developer.sigencloud.com/user/user/manual/77)
 - [Octopus REST API basics](https://docs.octopus.energy/rest/guides/api-basics/)
 - [Octopus GraphQL authentication](https://developer.octopus.energy/graphql/guides/basics)
 - [Octopus account API key guidance](https://octopus.energy/help-and-faqs/articles/how-do-i-access-the-octopus-api/)
@@ -536,3 +850,5 @@ their data-handling warnings are documented in
 - [InfluxDB OSS 2.x token creation](https://docs.influxdata.com/influxdb/v2/admin/tokens/create-token/)
 - [Influx CLI `auth create`](https://docs.influxdata.com/influxdb/v2/reference/cli/influx/auth/create/)
 - [Proxmox `pct` reference](https://pve.proxmox.com/pve-docs/pct.1.html)
+- [Nginx HTTP basic authentication](https://nginx.org/en/docs/http/ngx_http_auth_basic_module.html)
+- [Nginx HTTP proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_module.html)
