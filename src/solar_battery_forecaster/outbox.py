@@ -453,14 +453,18 @@ class DurableOutbox:
                 ).fetchone()
         return None
 
-    def _queue_rows(self, where: str = "1", parameters: tuple = ()) -> Iterator[sqlite3.Row]:
+    def _queue_rows(
+        self, *, property_id: str | None = None, logical_kind: str | None = None
+    ) -> Iterator[sqlite3.Row]:
         # A one-row keyset batch bounds memory even when max_record_bytes is 16 MiB.
         # Finishing each cursor before quarantine avoids mutation during a live scan.
         seq = 0
         while True:
             row = self.connection.execute(
-                f"SELECT * FROM queue WHERE seq > ? AND ({where}) ORDER BY seq LIMIT 1",
-                (seq, *parameters),
+                """SELECT * FROM queue WHERE seq > ?
+                AND (? IS NULL OR property_id=?)
+                AND (? IS NULL OR logical_kind=?) ORDER BY seq LIMIT 1""",
+                (seq, property_id, property_id, logical_kind, logical_kind),
             ).fetchone()
             if row is None:
                 return
@@ -543,8 +547,7 @@ class DurableOutbox:
         self, property_id: str, provider: str, start: datetime, stop: datetime
     ) -> list[ForecastSnapshot]:
         rows = self._queue_rows(
-            "property_id=? AND logical_kind='forecast_snapshot'",
-            (property_id,),
+            property_id=property_id, logical_kind="forecast_snapshot",
         )
         result: list[ForecastSnapshot] = []
         for row in rows:

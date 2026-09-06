@@ -88,6 +88,33 @@ def test_near_capacity_restart_verification_has_bounded_python_memory(tmp_path):
         tracemalloc.stop()
 
 
+def test_keyset_reader_selects_exact_property_and_kind(tmp_path):
+    state = tmp_path / "state"
+    outbox = DurableOutbox(state, config(state), "forecast-plan")
+    at = datetime(2026, 9, 5, tzinfo=UTC)
+    expected = []
+    try:
+        for index, (property_id, kind) in enumerate([
+            ("home", "forecast_snapshot"), ("other", "forecast_snapshot"),
+            ("home", "battery_decision"), ("home", "forecast_snapshot"),
+        ]):
+            event_id = outbox.enqueue(
+                property_id=property_id, org="org", bucket="bucket", logical_kind=kind,
+                logical_key=str(index), min_timestamp=at, max_timestamp=at,
+                payload=b"measurement value=1i 1",
+            )
+            if property_id == "home" and kind == "forecast_snapshot":
+                expected.append(event_id)
+        rows = list(outbox._queue_rows(property_id="home", logical_kind="forecast_snapshot"))
+        assert [row["event_id"] for row in rows] == expected
+        assert len(list(outbox._queue_rows(property_id="home"))) == 3
+        assert len(list(outbox._queue_rows(logical_kind="forecast_snapshot"))) == 3
+        assert len(list(outbox._queue_rows())) == 4
+        assert not list(outbox._queue_rows(property_id="missing"))
+    finally:
+        outbox.close()
+
+
 def test_fallback_commit_precedes_replay_and_ambiguous_failure_replays_whole_record(
     tmp_path: Path,
 ) -> None:
