@@ -6,6 +6,17 @@ approval record. Exact candidate evidence belongs in the PR and process-control 
 
 ## Release prerequisites
 
+- **Optional satellite irradiance:** validate site geometry and provider licence/quotas/coverage
+  before enabling `irradiance-history`. Historical values are satellite-derived estimates; no site
+  sensor is claimed. Verify original forecast snapshot capture, stable historical revisions,
+  latest-response coverage versus retained older non-null values, and exact-byte fallback/restart
+  replay against a disposable InfluxDB. Never fabricate older forecasts from historical weather.
+  Run the opt-in integration fixture only against an uninitialized loopback test instance.
+- **Additional worker capacity:** history adds 80 MB, raising service ceilings to 496 MB. A
+  512 MB LXC has insufficient validated headroom. Increase allocation and complete Linux memory,
+  restart, peer-secret isolation and provider-rate acceptance without reducing existing limits.
+  Source/unit tests and a public synthetic endpoint probe are not deployment approval.
+
 - **Sigenergy vendor access:** still pending. Obtain Monitoring-only credentials, confirm official
   response fields, units, observation time, online/stale behaviour and installed capacities using
   the [credential guide](setup-and-credentials.md). Fixture normalization does not prove any of

@@ -13,8 +13,10 @@ import httpx
 from solar_battery_forecaster.adapters.factory import (
     forecast_adapter,
     inverter_adapter,
+    irradiance_history_adapter,
     tariff_adapter,
 )
+from solar_battery_forecaster.adapters.forecast.open_meteo import geometry_id
 from solar_battery_forecaster.config import AppConfig, PropertyConfig
 from solar_battery_forecaster.models import (
     ForecastInterval,
@@ -338,6 +340,7 @@ class ForecastPlanOperation(Operation):
                 forecast_day_start=forecast_start,
                 forecast_day_stop=forecast_stop,
                 inverter_limit_kw=prop.inverter.rated_power_kw,
+                irradiance_intervals=all_intervals,
             )
             self.record_accepted(forecast_disposition)
             LOGGER.info("accepted forecast for %s delivery=%s", prop.id, forecast_disposition)
@@ -423,6 +426,63 @@ class ForecastPlanOperation(Operation):
             )
         ):
             raise RuntimeError("forecast provider returned incomplete coverage")
+
+
+class IrradianceHistoryOperation(Operation):
+    name = "irradiance-history"
+
+    def __init__(self, config: AppConfig, store: InfluxStore | None = None) -> None:
+        super().__init__(config, store)
+        self.adapters = {
+            prop.id: irradiance_history_adapter(prop, self.client, self.pacer)
+            for prop in config.properties if prop.irradiance_history.enabled
+        }
+
+    async def close(self) -> None:
+        await asyncio.gather(*(adapter.close() for adapter in self.adapters.values()))
+        await super().close()
+
+    async def run_cycle(self, now: datetime | None = None) -> bool:
+        await asyncio.to_thread(self.store.replay)
+        refresh_day = (now or datetime.now(UTC)).astimezone(UTC).date()
+        success = True
+        enabled = [prop for prop in self.config.properties if prop.irradiance_history.enabled]
+        for index, prop in enumerate(enabled):
+            adapter = self.adapters[prop.id]
+            geometries = tuple((array.name, geometry_id(prop, array)) for array in prop.arrays)
+            for age in range(prop.irradiance_history.catch_up_days, 0, -1):
+                day = refresh_day - timedelta(days=age)
+                try:
+                    key = self.store.irradiance_history_key(
+                        prop.id, day, adapter.name, adapter.model, geometries,
+                    )
+                    collected = await asyncio.to_thread(
+                        self.store.irradiance_history_collected, key, day, refresh_day,
+                    )
+                except Exception as exc:
+                    if self.reporter is not None:
+                        self.reporter.property_failed(exc)
+                    LOGGER.error("history due scan failed for %s (%s)", prop.id, type(exc).__name__)
+                    success = False
+                    break
+                if not collected:
+                    accepted = await self.run_property_safely(
+                        prop, day=day, refresh_day=refresh_day,
+                    )
+                    success = accepted and success
+            if index + 1 < len(enabled):
+                await asyncio.sleep(self.config.schedule.property_phase_seconds)
+        return success
+
+    async def run_property(self, prop: PropertyConfig, **kwargs: object) -> None:
+        day, refresh_day = kwargs["day"], kwargs["refresh_day"]
+        if not isinstance(day, date) or not isinstance(refresh_day, date):
+            raise TypeError("history requires UTC dates")
+        intervals = await self.adapters[prop.id].fetch(prop, day)
+        disposition = await asyncio.to_thread(
+            self.store.write_irradiance_history, prop.id, day, refresh_day, intervals,
+        )
+        self.record_accepted(disposition)
 
 
 class ReconciliationOperation(Operation):

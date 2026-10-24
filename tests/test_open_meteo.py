@@ -81,6 +81,7 @@ async def test_fetch_combines_arrays_and_caps_at_inverter_rating() -> None:
             json={
                 "hourly": {
                     "time": hours(),
+                    "shortwave_radiation": [600] * 72,
                     "global_tilted_irradiance": [1000] * 72,
                 }
             },
@@ -97,6 +98,12 @@ async def test_fetch_combines_arrays_and_caps_at_inverter_rating() -> None:
     assert result[0].end == datetime(2026, 9, 6, tzinfo=UTC)
     assert result[0].energy_kwh == 6
     assert result[0].power_kw == 6
+    assert len(result[0].irradiance) == 2
+    assert result[0].irradiance[0].ghi_w_m2 == 600
+    assert result[0].irradiance[0].gti_w_m2 == 1000
+    assert result[0].irradiance[0].azimuth_degrees == 90
+    assert result[0].irradiance[1].azimuth_degrees == 270
+    assert result[0].irradiance[0].geometry != result[0].irradiance[1].geometry
 
 
 @pytest.mark.asyncio

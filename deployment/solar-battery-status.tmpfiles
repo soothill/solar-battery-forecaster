@@ -4,3 +4,4 @@ d /run/solar-battery-status/tariff 2750 solar-tariff solar-observe -
 d /run/solar-battery-status/forecast-plan 2750 solar-forecast-plan solar-observe -
 d /run/solar-battery-status/reconciliation 2750 solar-reconciliation solar-observe -
 d /run/solar-battery-status/dashboard 2750 solar-dashboard solar-observe -
+d /run/solar-battery-status/irradiance-history 2750 solar-irradiance-history solar-observe -

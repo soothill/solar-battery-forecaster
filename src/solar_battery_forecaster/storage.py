@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 from collections.abc import Iterable
@@ -15,6 +17,7 @@ from solar_battery_forecaster.models import (
     BatteryDecision,
     ForecastInterval,
     ForecastSnapshot,
+    HistoricalIrradianceInterval,
     StoredTariffs,
     TariffInterval,
     Telemetry,
@@ -160,6 +163,7 @@ class InfluxStore:
         forecast_day_start: datetime | None = None,
         forecast_day_stop: datetime | None = None,
         inverter_limit_kw: float | None = None,
+        irradiance_intervals: list[ForecastInterval] | None = None,
     ) -> DeliveryDisposition:
         points = []
         corrected_by_start: dict[datetime, float] = {}
@@ -196,6 +200,24 @@ class InfluxStore:
                 .field("issued_at_epoch", int(interval.issued_at.timestamp()))
                 .time(interval.start, WritePrecision.S)
             )
+        for interval in irradiance_intervals if irradiance_intervals is not None else intervals:
+            for array in interval.irradiance:
+                point = (
+                    Point("irradiance_forecast")
+                    .tag("property", property_id).tag("provider", interval.provider)
+                    .tag("array", array.array).tag("geometry", array.geometry)
+                    .tag("snapshot", forecast_snapshot_id(interval.issued_at))
+                    .field("tilt_degrees", array.tilt_degrees)
+                    .field("azimuth_degrees", array.azimuth_degrees)
+                    .field("ghi_valid", array.ghi_w_m2 is not None)
+                    .field("gti_valid", array.gti_w_m2 is not None)
+                    .field("ghi_w_m2", array.ghi_w_m2)
+                    .field("gti_w_m2", array.gti_w_m2)
+                    .field("unit", "W/m²").field("interval_minutes", 60)
+                    .field("issued_at", interval.issued_at.astimezone(UTC).isoformat())
+                    .time(interval.start, WritePrecision.S)
+                )
+                points.append(point)
         if not intervals:
             return "ignored"
         day_start = forecast_day_start or intervals[0].start
@@ -234,6 +256,99 @@ class InfluxStore:
                     for item in intervals
                 ],
             },
+        )
+
+    @staticmethod
+    def irradiance_history_key(
+        property_id: str, day: date, provider: str, model: str,
+        geometries: tuple[tuple[str, str], ...],
+    ) -> str:
+        identity = json.dumps([property_id, provider, model, sorted(geometries)])
+        return hashlib.sha256(identity.encode()).hexdigest()[:32] + ":" + day.isoformat()
+
+    def irradiance_history_collected(
+        self, key: str, day: date, refresh_day: date,
+    ) -> bool:
+        # A queued older refresh also blocks refetch until FIFO replay clears it.
+        outbox = getattr(self, "outbox", None)
+        if outbox is not None and outbox.pending("irradiance_history", key):
+            return True
+        start = datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+        stop = start + timedelta(days=1)
+        query = f'''
+from(bucket: {json.dumps(self.config.planning_bucket)})
+  |> range(start: time(v: "{start.isoformat()}"), stop: time(v: "{stop.isoformat()}"))
+  |> filter(fn: (r) => r._measurement == "irradiance_history_collection")
+  |> filter(fn: (r) => r.collection == {json.dumps(key)})
+  |> filter(fn: (r) => r._field == "refresh_day" and r._value == "{refresh_day.isoformat()}")
+  |> limit(n: 1)
+'''
+        return bool(self._records(query))
+
+    def write_irradiance_history(
+        self, property_id: str, day: date, refresh_day: date,
+        intervals: list[HistoricalIrradianceInterval],
+    ) -> DeliveryDisposition:
+        start = datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+        stop = start + timedelta(days=1)
+        if len(intervals) != 24 or [item.start for item in intervals] != [
+            start + timedelta(hours=hour) for hour in range(24)
+        ]:
+            raise ValueError("history batch must describe one complete UTC day")
+        first = intervals[0]
+        geometries = tuple((item.array, item.geometry) for item in first.irradiance)
+        key = self.irradiance_history_key(
+            property_id, day, first.provider, first.model, geometries,
+        )
+        points = []
+        counts = {(array, geometry, metric): 0 for array, geometry in geometries
+                  for metric in ("ghi", "gti")}
+        for interval in intervals:
+            if (
+                interval.source_kind != "satellite_derived"
+                or interval.provider != first.provider or interval.model != first.model
+                or interval.end - interval.start != timedelta(hours=1)
+                or tuple((a.array, a.geometry) for a in interval.irradiance) != geometries
+            ):
+                raise ValueError("history batch has inconsistent provenance")
+            for array in interval.irradiance:
+                for metric, value in (("ghi", array.ghi_w_m2), ("gti", array.gti_w_m2)):
+                    if value is None:
+                        continue  # Keep the previous estimate and its original collection time.
+                    if not math.isfinite(value) or not 0 <= value <= 2000:
+                        raise ValueError("history batch has invalid irradiance")
+                    counts[(array.array, array.geometry, metric)] += 1
+                    points.append(
+                        Point("irradiance_history")
+                        .tag("property", property_id).tag("provider", interval.provider)
+                        .tag("model", interval.model).tag("source_kind", interval.source_kind)
+                        .tag("array", array.array).tag("geometry", array.geometry)
+                        .tag("metric", metric)
+                        .field("value_w_m2", float(value)).field("unit", "W/m²")
+                        .field("interval_minutes", 60)
+                        .field("tilt_degrees", array.tilt_degrees)
+                        .field("azimuth_degrees", array.azimuth_degrees)
+                        .field("collected_at", interval.collected_at.astimezone(UTC).isoformat())
+                        .time(interval.start, WritePrecision.S)
+                    )
+        for (array, geometry, metric), count in counts.items():
+            points.append(
+                Point("irradiance_history_collection")
+                .tag("property", property_id).tag("provider", first.provider)
+                .tag("model", first.model).tag("source_kind", first.source_kind)
+                .tag("array", array).tag("geometry", geometry).tag("metric", metric)
+                .tag("collection", key)
+                .field("refresh_day", refresh_day.isoformat())
+                .field("collected_at", first.collected_at.astimezone(UTC).isoformat())
+                .field("expected_hours", 24).field("valid_hours", count)
+                .field("coverage", count / 24).field("complete", count == 24)
+                .time(start, WritePrecision.S)
+            )
+        return self._write(
+            self.config.planning_bucket, points, property_id=property_id,
+            logical_kind="irradiance_history", logical_key=key,
+            min_timestamp=start, max_timestamp=stop,
+            metadata={"refresh_day": refresh_day.isoformat()},
         )
 
     def write_telemetry(

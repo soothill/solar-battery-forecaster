@@ -16,6 +16,7 @@ from solar_battery_forecaster.config import (
 from solar_battery_forecaster.observability import close_reporter, create_reporter
 from solar_battery_forecaster.operations import (
     ForecastPlanOperation,
+    IrradianceHistoryOperation,
     Operation,
     ReconciliationOperation,
     TariffOperation,
@@ -28,6 +29,7 @@ WORKERS: dict[str, type[Operation]] = {
     "tariff": TariffOperation,
     "forecast-plan": ForecastPlanOperation,
     "reconciliation": ReconciliationOperation,
+    "irradiance-history": IrradianceHistoryOperation,
 }
 OUTBOX_ACTIONS = ["status", "verify", "drain", "export-quarantine", "retry"]
 
@@ -53,6 +55,8 @@ def worker_interval(config: AppConfig, command: str) -> float:
         return config.schedule.telemetry_seconds
     if command == "tariff":
         return config.schedule.tariff_minutes * 60
+    if command == "irradiance-history":
+        return 3600
     return config.schedule.worker_scan_seconds
 
 

@@ -41,6 +41,7 @@ influxdb:
     tariff: ${INFLUX_TARIFF_TOKEN}
     forecast-plan: ${INFLUX_FORECAST_PLAN_TOKEN}
     reconciliation: ${INFLUX_RECONCILIATION_TOKEN}
+    irradiance-history: ${INFLUX_IRRADIANCE_HISTORY_TOKEN}
     dashboard: ${INFLUX_DASHBOARD_TOKEN}
 outbox:
   state_directory: ${OUTBOX_STATE_DIRECTORY}
@@ -120,6 +121,7 @@ def test_influx_requires_https_and_explicit_isolated_test_opt_in():
         ("tariff", "INFLUX_TARIFF_TOKEN"),
         ("forecast-plan", "INFLUX_FORECAST_PLAN_TOKEN"),
         ("reconciliation", "INFLUX_RECONCILIATION_TOKEN"),
+        ("irradiance-history", "INFLUX_IRRADIANCE_HISTORY_TOKEN"),
         ("dashboard", "INFLUX_DASHBOARD_TOKEN"),
     ],
 )

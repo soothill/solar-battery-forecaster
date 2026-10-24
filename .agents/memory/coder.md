@@ -1,5 +1,11 @@
 # Coder memory
 
+- Forecast retrieval snapshots and revisable satellite-derived historical irradiance are distinct
+  datasets. Comparisons require matching geometry and UTC intervals. Retrospective weather-model
+  updates are neither ground measurements nor preserved decision-time forecasts. Null satellite
+  refreshes retain older non-null estimates with their original collection time; latest-response
+  coverage must be read separately before claiming fresh completeness.
+
 - 2026-09-06: Python 3.11+, Pydantic configuration, HTTPX adapters, asyncio worker loops with
   monotonic start-to-start deadlines, and the InfluxDB v2 client.
 - 2026-09-06: Local config.yaml and environment files matching .env, .env.* and *.env

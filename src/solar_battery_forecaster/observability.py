@@ -21,6 +21,7 @@ STATUS_SCHEMA_VERSION = 1
 STATUS_FILE = "status.json"
 STATUS_MAX_BYTES = 65_536
 STATUS_SERVICES = ("telemetry", "tariff", "forecast-plan", "reconciliation", "dashboard")
+OPTIONAL_STATUS_SERVICES = ("irradiance-history",)
 EXCEPTION_CLASS = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 FAILURE_CODE = re.compile(r"^(?:http_[1-5][0-9]{2}|[A-Za-z][A-Za-z0-9_]{0,63})$")
 EVENT_DEFINITIONS = {
@@ -170,7 +171,7 @@ class HealthReporter:
         config: ObservabilityConfig,
         property_ids: list[str],
     ) -> None:
-        if service not in STATUS_SERVICES:
+        if service not in (*STATUS_SERVICES, *OPTIONAL_STATUS_SERVICES):
             raise ValueError("unknown status service")
         if config.status_directory is None:
             raise ValueError("status directory is not configured")
@@ -348,14 +349,20 @@ def close_reporter(reporter: HealthReporter | None) -> None:
 
 
 class StatusRepository:
-    def __init__(self, dashboard_directory: Path, stale_after_seconds: int) -> None:
+    def __init__(
+        self, dashboard_directory: Path, stale_after_seconds: int,
+        *, irradiance_history_enabled: bool = False,
+    ) -> None:
         self.root = dashboard_directory.parent
         self.stale_after_seconds = stale_after_seconds
+        self.services = (*STATUS_SERVICES, *(
+            OPTIONAL_STATUS_SERVICES if irradiance_history_enabled else ()
+        ))
 
     def read(self) -> dict[str, object]:
         now = datetime.now(UTC)
         services: list[dict[str, object]] = []
-        for service in STATUS_SERVICES:
+        for service in self.services:
             directory = self.root / service
             item: dict[str, object] = {"service": service, "lifecycle": "missing", "stale": True}
             try:

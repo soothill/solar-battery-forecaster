@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
@@ -7,13 +9,29 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from solar_battery_forecaster.config import PropertyConfig
-from solar_battery_forecaster.models import ForecastInterval
+from solar_battery_forecaster.config import ArrayConfig, PropertyConfig
+from solar_battery_forecaster.models import ArrayIrradiance, ForecastInterval
 from solar_battery_forecaster.outbound import RequestPacer, default_pacer
 
 API_URL = "https://api.open-meteo.com/v1/forecast"
 MAX_HOURLY_POINTS = 72
 MAX_IRRADIANCE_W_M2 = 2_000
+
+
+def geometry_id(prop: PropertyConfig, array: ArrayConfig) -> str:
+    values = [prop.latitude, prop.longitude, array.tilt_degrees, array.azimuth_degrees]
+    return hashlib.sha256(json.dumps(values, separators=(",", ":")).encode()).hexdigest()[:24]
+
+
+def irradiance_value(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("provider returned invalid irradiance")
+    result = float(value)
+    if not math.isfinite(result) or not 0 <= result <= MAX_IRRADIANCE_W_M2:
+        raise ValueError("provider returned invalid irradiance")
+    return result
 
 
 def compass_to_open_meteo_azimuth(compass_degrees: float) -> float:
@@ -41,6 +59,7 @@ class OpenMeteoForecast:
     async def fetch(self, prop: PropertyConfig) -> list[ForecastInterval]:
         issued_at = datetime.now(UTC)
         energy_by_end: dict[datetime, float] = defaultdict(float)
+        raw_by_end: dict[datetime, list[ArrayIrradiance]] = defaultdict(list)
         required_start = issued_at.replace(minute=0, second=0, microsecond=0)
         local_day = issued_at.astimezone(ZoneInfo(prop.timezone)).date()
         required_stop = datetime.combine(
@@ -62,7 +81,7 @@ class OpenMeteoForecast:
                 params={
                     "latitude": prop.latitude,
                     "longitude": prop.longitude,
-                    "hourly": "global_tilted_irradiance",
+                    "hourly": "shortwave_radiation,global_tilted_irradiance",
                     "tilt": array.tilt_degrees,
                     "azimuth": compass_to_open_meteo_azimuth(array.azimuth_degrees),
                     "timezone": "UTC",
@@ -76,15 +95,25 @@ class OpenMeteoForecast:
                 raise ValueError("forecast provider returned invalid hourly arrays")
             times = hourly.get("time", [])
             irradiances = hourly.get("global_tilted_irradiance", [])
+            ghi_values = hourly.get("shortwave_radiation", [None] * len(times))
+            units = payload.get("hourly_units", {})
+            if not isinstance(units, dict) or any(
+                units.get(metric, "W/m²") != "W/m²"
+                for metric in ("shortwave_radiation", "global_tilted_irradiance")
+            ):
+                raise ValueError("forecast provider returned invalid irradiance units")
             if not isinstance(times, list) or not isinstance(irradiances, list):
                 raise ValueError("forecast provider returned invalid hourly arrays")
+            if not isinstance(ghi_values, list) or len(ghi_values) != len(times):
+                raise ValueError("forecast provider returned invalid GHI arrays")
             if len(times) > MAX_HOURLY_POINTS or len(irradiances) > MAX_HOURLY_POINTS:
                 raise ValueError("forecast provider returned too many hourly points")
             array_ends: set[datetime] = set()
             valid_ends: set[datetime] = set()
-            for time_text, irradiance in zip(
+            for time_text, irradiance, ghi in zip(
                 times,
                 irradiances,
+                ghi_values,
                 strict=True,
             ):
                 interval_end = datetime.fromisoformat(time_text)
@@ -97,17 +126,21 @@ class OpenMeteoForecast:
                 ):
                     raise ValueError("forecast provider returned duplicate or unaligned hours")
                 array_ends.add(interval_end)
+                irradiance_number = irradiance_value(irradiance)
+                raw_by_end[interval_end].append(ArrayIrradiance(
+                    array=array.name,
+                    tilt_degrees=array.tilt_degrees,
+                    azimuth_degrees=array.azimuth_degrees,
+                    ghi_w_m2=irradiance_value(ghi),
+                    gti_w_m2=irradiance_number,
+                    geometry=geometry_id(prop, array),
+                ))
                 if irradiance is None:
                     continue
-                irradiance_value = float(irradiance)
-                if not math.isfinite(irradiance_value) or not (
-                    0 <= irradiance_value <= MAX_IRRADIANCE_W_M2
-                ):
-                    raise ValueError("forecast provider returned invalid irradiance")
                 valid_ends.add(interval_end)
                 # GTI is the mean W/m2 over the preceding hour. kWp is rated at 1000 W/m2.
                 energy_by_end[interval_end] += (
-                    irradiance_value / 1000
+                    irradiance_number / 1000
                     * array.capacity_kwp
                     * array.performance_ratio
                 )
@@ -128,6 +161,7 @@ class OpenMeteoForecast:
                     power_kw=energy,
                     issued_at=issued_at,
                     provider=self.name,
+                    irradiance=tuple(raw_by_end[end]),
                 )
             )
         return result

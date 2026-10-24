@@ -4,15 +4,16 @@ import shlex
 from pathlib import Path
 
 
-def test_five_workers_have_independent_restart_contracts() -> None:
+def test_six_services_have_independent_restart_contracts() -> None:
     root = Path(__file__).parents[1]
     unit_paths = sorted((root / "deployment").glob("*.service"))
-    assert len(unit_paths) == 5
+    assert len(unit_paths) == 6
     identity_by_environment = {
         "telemetry.env": "solar-telemetry",
         "tariff.env": "solar-tariff",
         "forecast-plan.env": "solar-forecast-plan",
         "reconciliation.env": "solar-reconciliation",
+        "irradiance-history.env": "solar-irradiance-history",
         "dashboard.env": "solar-dashboard",
     }
 
@@ -60,6 +61,7 @@ def test_five_workers_have_independent_restart_contracts() -> None:
         ("solar-battery-forecaster", "tariff"),
         ("solar-battery-forecaster", "forecast-plan"),
         ("solar-battery-forecaster", "reconciliation"),
+        ("solar-battery-forecaster", "irradiance-history"),
         ("solar-battery-dashboard", "dashboard"),
     }
     assert environment_files == {
@@ -67,6 +69,7 @@ def test_five_workers_have_independent_restart_contracts() -> None:
         "/etc/solar-battery-forecaster/tariff.env",
         "/etc/solar-battery-forecaster/forecast-plan.env",
         "/etc/solar-battery-forecaster/reconciliation.env",
+        "/etc/solar-battery-forecaster/irradiance-history.env",
         "/etc/solar-battery-forecaster/dashboard.env",
     }
     assert identities == {
@@ -74,6 +77,7 @@ def test_five_workers_have_independent_restart_contracts() -> None:
         ("solar-tariff", "solar-tariff"),
         ("solar-forecast-plan", "solar-forecast-plan"),
         ("solar-reconciliation", "solar-reconciliation"),
+        ("solar-irradiance-history", "solar-irradiance-history"),
         ("solar-dashboard", "solar-dashboard"),
     }
     assert memory_limits == {
@@ -81,6 +85,7 @@ def test_five_workers_have_independent_restart_contracts() -> None:
         "solar-tariff": "80M",
         "solar-forecast-plan": "80M",
         "solar-reconciliation": "80M",
+        "solar-irradiance-history": "80M",
         "solar-dashboard": "96M",
     }
 
@@ -109,7 +114,7 @@ def test_deployment_assigns_each_secret_file_to_only_its_service_group() -> None
 
 def test_writer_environment_files_bind_private_outbox_directories() -> None:
     root = Path(__file__).parents[1]
-    for worker in ["telemetry", "tariff", "forecast-plan", "reconciliation"]:
+    for worker in ["telemetry", "tariff", "forecast-plan", "reconciliation", "irradiance-history"]:
         environment = (root / "deployment" / "environment" / f"{worker}.env.example").read_text(
             encoding="utf-8"
         )

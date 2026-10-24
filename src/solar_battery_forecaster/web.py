@@ -138,6 +138,9 @@ def make_server(
     BoundHandler.status_repository = status_repository or StatusRepository(
         config.observability.status_directory,  # type: ignore[arg-type]
         config.observability.stale_after_seconds,
+        irradiance_history_enabled=any(
+            prop.irradiance_history.enabled for prop in config.properties
+        ),
     )
     return ThreadingHTTPServer((host, port), BoundHandler)
 
