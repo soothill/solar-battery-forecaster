@@ -13,6 +13,7 @@ from solar_battery_forecaster.config import HttpConfig, OutboxConfig
 from solar_battery_forecaster.models import (
     ArrayIrradiance,
     ForecastInterval,
+    ForecastIrradianceInterval,
     HistoricalIrradianceInterval,
 )
 from solar_battery_forecaster.observability import StatusRepository
@@ -274,3 +275,17 @@ def test_history_due_read_failure_is_not_absence_and_geometry_changes_identity()
     store._records = fail
     with pytest.raises(ConnectionError):
         store.irradiance_history_collected(key, day, day + timedelta(days=1))
+
+
+def test_forecast_rejects_stale_raw_attachment_and_honors_empty_raw_transport():
+    store, batches = capture_store()
+    at = datetime(2026, 9, 5, tzinfo=UTC)
+    sample = ArrayIrradiance("roof", 35, 180, 123, 200, "geometry")
+    pv = ForecastInterval(at, at + timedelta(hours=1), 1, 1, at, "test", irradiance=(sample,))
+    raw = ForecastIrradianceInterval(at, pv.end, at - timedelta(hours=1), "test", (sample,))
+    with pytest.raises(ValueError, match="snapshot"):
+        store.write_forecast("test-home", [pv], 1, 1, irradiance_intervals=(raw,))
+    assert not batches
+    store.write_forecast("test-home", [pv], 1, 1, irradiance_intervals=())
+    assert len(batches[0][0]) == 1
+    assert batches[0][0][0].startswith("pv_forecast,")

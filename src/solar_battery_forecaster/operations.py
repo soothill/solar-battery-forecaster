@@ -316,6 +316,7 @@ class ForecastPlanOperation(Operation):
         )
         if snapshot is None:
             all_intervals = await adapter.fetch(prop)
+            raw_intervals = getattr(adapter, "raw_intervals", all_intervals)
             intervals = [
                 item
                 for item in all_intervals
@@ -340,7 +341,7 @@ class ForecastPlanOperation(Operation):
                 forecast_day_start=forecast_start,
                 forecast_day_stop=forecast_stop,
                 inverter_limit_kw=prop.inverter.rated_power_kw,
-                irradiance_intervals=all_intervals,
+                irradiance_intervals=raw_intervals,
             )
             self.record_accepted(forecast_disposition)
             LOGGER.info("accepted forecast for %s delivery=%s", prop.id, forecast_disposition)

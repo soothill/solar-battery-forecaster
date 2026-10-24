@@ -10,7 +10,11 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from solar_battery_forecaster.config import ArrayConfig, PropertyConfig
-from solar_battery_forecaster.models import ArrayIrradiance, ForecastInterval
+from solar_battery_forecaster.models import (
+    ArrayIrradiance,
+    ForecastInterval,
+    ForecastIrradianceInterval,
+)
 from solar_battery_forecaster.outbound import RequestPacer, default_pacer
 
 API_URL = "https://api.open-meteo.com/v1/forecast"
@@ -51,12 +55,14 @@ class OpenMeteoForecast:
         self._client = client or httpx.AsyncClient(timeout=30)
         self._owns_client = client is None
         self._pacer = pacer or default_pacer()
+        self.raw_intervals: tuple[ForecastIrradianceInterval, ...] = ()
 
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
 
     async def fetch(self, prop: PropertyConfig) -> list[ForecastInterval]:
+        self.raw_intervals = ()
         issued_at = datetime.now(UTC)
         energy_by_end: dict[datetime, float] = defaultdict(float)
         raw_by_end: dict[datetime, list[ArrayIrradiance]] = defaultdict(list)
@@ -152,6 +158,8 @@ class OpenMeteoForecast:
 
         result: list[ForecastInterval] = []
         for end, uncapped_energy in sorted(energy_by_end.items()):
+            if any(sample.gti_w_m2 is None for sample in raw_by_end[end]):
+                continue  # An incomplete roof sum is not a valid PV forecast.
             energy = min(uncapped_energy, prop.inverter.rated_power_kw)
             result.append(
                 ForecastInterval(
@@ -164,4 +172,9 @@ class OpenMeteoForecast:
                     irradiance=tuple(raw_by_end[end]),
                 )
             )
+        self.raw_intervals = tuple(
+            ForecastIrradianceInterval(
+                end - timedelta(hours=1), end, issued_at, self.name, tuple(samples),
+            ) for end, samples in sorted(raw_by_end.items())
+        )
         return result

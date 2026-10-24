@@ -19,6 +19,15 @@ class ArrayIrradiance:
 
 
 @dataclass(frozen=True)
+class ForecastIrradianceInterval:
+    start: datetime
+    end: datetime
+    issued_at: datetime
+    provider: str
+    irradiance: tuple[ArrayIrradiance, ...]
+
+
+@dataclass(frozen=True)
 class ForecastInterval:
     start: datetime
     end: datetime

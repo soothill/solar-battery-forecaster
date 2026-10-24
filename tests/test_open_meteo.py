@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -8,6 +9,7 @@ from solar_battery_forecaster.adapters.forecast.open_meteo import (
     compass_to_open_meteo_azimuth,
 )
 from solar_battery_forecaster.config import PropertyConfig
+from solar_battery_forecaster.storage import InfluxStore
 
 
 @pytest.fixture(autouse=True)
@@ -168,3 +170,68 @@ async def test_each_roof_requires_complete_unique_aligned_hours(fault):
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(ValueError, match="coverage|hours"):
             await OpenMeteoForecast(client).fetch(property_config())
+
+
+@pytest.mark.parametrize("missing_roofs", [1, 2])
+async def test_raw_only_hour_survives_fetch_and_same_batch_storage(missing_roofs):
+    calls = 0
+
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        values = [200] * 72
+        if calls <= missing_roofs:
+            values[10] = None
+        return httpx.Response(200, json={"hourly": {
+            "time": hours(), "shortwave_radiation": [123] * 72,
+            "global_tilted_irradiance": values,
+        }})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenMeteoForecast(client)
+        forecasts = await adapter.fetch(property_config())
+    missing_at = datetime(2026, 9, 6, 9, tzinfo=UTC)
+    assert len(forecasts) == 71
+    assert len(adapter.raw_intervals) == 72
+    assert all(item.start != missing_at for item in forecasts)
+    raw_only = next(item for item in adapter.raw_intervals if item.start == missing_at)
+    assert all(item.ghi_w_m2 == 123 for item in raw_only.irradiance)
+    assert not hasattr(raw_only, "energy_kwh")
+    store = object.__new__(InfluxStore)
+    store.config = SimpleNamespace(planning_bucket="planning")
+    batches = []
+
+    def capture(bucket, points, **kwargs):
+        batches.append([point.to_line_protocol() for point in points])
+        return "direct"
+
+    store._write = capture
+    store.write_forecast("test-home", forecasts, 1, 1, irradiance_intervals=adapter.raw_intervals)
+    assert len(batches) == 1
+    target_lines = [line for line in batches[0] if line.endswith(f" {int(missing_at.timestamp())}")]
+    assert len(target_lines) == 2
+    assert all(line.startswith("irradiance_forecast,") for line in target_lines)
+    assert all("ghi_w_m2=123" in line for line in target_lines)
+    assert all("snapshot=2026-09-06T21:30:00.000000Z" in line for line in batches[0])
+
+
+async def test_failed_fetch_clears_previous_raw_snapshot():
+    fail = False
+
+    def handler(request):
+        values = [200] * 72
+        if fail:
+            values[30] = None
+        return httpx.Response(200, json={"hourly": {
+            "time": hours(), "shortwave_radiation": [123] * 72,
+            "global_tilted_irradiance": values,
+        }})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenMeteoForecast(client)
+        await adapter.fetch(property_config())
+        assert len(adapter.raw_intervals) == 72
+        fail = True
+        with pytest.raises(ValueError, match="coverage"):
+            await adapter.fetch(property_config())
+        assert adapter.raw_intervals == ()

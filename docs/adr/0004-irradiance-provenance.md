@@ -9,6 +9,11 @@ does not invalidate usable PV forecasts. All fetched raw intervals share one ser
 issued-time snapshot with selected `pv_forecast` intervals. `issued_at` means fetch time, not
 model-run time. Reusing a stored snapshot never attaches newer raw data.
 
+Raw transport is an independent tuple of frozen `ForecastIrradianceInterval` records without PV
+fields. It includes hours with missing GTI, even outside required planning coverage. Such hours
+never become zero or partial-roof PV predictions. The adapter clears this tuple before each fetch
+and publishes it only after validation succeeds; storage rejects a different provider/issue time.
+
 `irradiance_history` has stable property/array/geometry/provider/model/source_kind/metric tags and
 target-hour timestamps. `source_kind=satellite_derived` is explicit; there is no site sensor.
 Non-null estimates revise the same identity. `collected_at` is a field. Null refreshes retain

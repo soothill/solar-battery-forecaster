@@ -33,6 +33,11 @@ snapshot tag. It stores uncorrected `ghi_w_m2`/`gti_w_m2`, validity, geometry, o
 unit and `issued_at` (fetch time). Inverter clipping does not change raw irradiance. Legacy
 snapshots lack this measurement and remain unchanged when reused.
 
+Provider responses also include already elapsed target hours. Saving these records does not make
+post-target retrieved values advance forecasts. Accuracy reports must select a snapshot retrieved
+before the target interval or the specified day/decision cutoff, never the latest post-event
+snapshot. `issued_at` is retrieval time, not the provider's upstream model issuance time.
+
 `irradiance_history` stores separate `metric=ghi` and `metric=gti` points with `value_w_m2`, unit,
 duration and `collected_at`. Valid revisions overwrite the same identity. Null refreshes retain
 older estimates and their old collection time. `irradiance_history_collection` stores the latest

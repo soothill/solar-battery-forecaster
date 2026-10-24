@@ -5,6 +5,9 @@
   updates are neither ground measurements nor preserved decision-time forecasts. Null satellite
   refreshes retain older non-null estimates with their original collection time; latest-response
   coverage must be read separately before claiming fresh completeness.
+- Preserve raw forecast observations independently of derived PV intervals: nullable GTI must not
+  discard valid GHI or become zero/partial-roof PV. Clear transport state before fetch and bind raw
+  records to the same provider/issue-time identity at the storage boundary.
 
 - 2026-09-06: Python 3.11+, Pydantic configuration, HTTPX adapters, asyncio worker loops with
   monotonic start-to-start deadlines, and the InfluxDB v2 client.

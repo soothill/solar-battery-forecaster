@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal, TypeAlias
 
@@ -16,6 +16,7 @@ from solar_battery_forecaster.config import InfluxConfig, OutboxConfig
 from solar_battery_forecaster.models import (
     BatteryDecision,
     ForecastInterval,
+    ForecastIrradianceInterval,
     ForecastSnapshot,
     HistoricalIrradianceInterval,
     StoredTariffs,
@@ -163,8 +164,16 @@ class InfluxStore:
         forecast_day_start: datetime | None = None,
         forecast_day_stop: datetime | None = None,
         inverter_limit_kw: float | None = None,
-        irradiance_intervals: list[ForecastInterval] | None = None,
+        irradiance_intervals: Sequence[ForecastIrradianceInterval | ForecastInterval] | None = None,
     ) -> DeliveryDisposition:
+        if not intervals:
+            return "ignored"
+        identity = (intervals[0].provider, intervals[0].issued_at)
+        raw_intervals = irradiance_intervals if irradiance_intervals is not None else intervals
+        if any(
+            (item.provider, item.issued_at) != identity for item in (*intervals, *raw_intervals)
+        ):
+            raise ValueError("forecast batch must share one provider and issued-time snapshot")
         points = []
         corrected_by_start: dict[datetime, float] = {}
         for interval in intervals:
@@ -200,7 +209,7 @@ class InfluxStore:
                 .field("issued_at_epoch", int(interval.issued_at.timestamp()))
                 .time(interval.start, WritePrecision.S)
             )
-        for interval in irradiance_intervals if irradiance_intervals is not None else intervals:
+        for interval in raw_intervals:
             for array in interval.irradiance:
                 point = (
                     Point("irradiance_forecast")

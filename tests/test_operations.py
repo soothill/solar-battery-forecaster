@@ -7,6 +7,7 @@ import pytest
 from solar_battery_forecaster.config import BatteryConfig
 from solar_battery_forecaster.models import (
     ForecastInterval,
+    ForecastIrradianceInterval,
     ForecastSnapshot,
     StoredTariffs,
     TariffInterval,
@@ -317,6 +318,7 @@ async def test_production_planner_preserves_bridge_and_reuses_snapshot(local_day
     ]
     tariffs = [TariffInterval(start, stop, 7.0, True)]
     stored = {"snapshot": None, "fetches": 0, "decisions": []}
+    raw = (ForecastIrradianceInterval(start, start + timedelta(hours=1), now, "test", ()),)
 
     async def fetch(prop):
         stored["fetches"] += 1
@@ -325,6 +327,8 @@ async def test_production_planner_preserves_bridge_and_reuses_snapshot(local_day
     def write_forecast(property_id, saved, factor, multiplier, **kwargs):
         assert saved[0].start <= observed
         assert kwargs["forecast_day_start"] == day
+        assert kwargs["irradiance_intervals"] is raw
+        assert stored["snapshot"] is None  # Reuse must not write replacement raw data.
         stored["snapshot"] = ForecastSnapshot(
             "test",
             forecast_snapshot_id(now),
@@ -351,7 +355,7 @@ async def test_production_planner_preserves_bridge_and_reuses_snapshot(local_day
         write_decision=write_decision,
     )
     operation.config = SimpleNamespace(schedule=SimpleNamespace(telemetry_stale_after_seconds=900))
-    operation.adapters = {"home": SimpleNamespace(name="test", fetch=fetch)}
+    operation.adapters = {"home": SimpleNamespace(name="test", fetch=fetch, raw_intervals=raw)}
     prop = SimpleNamespace(
         id="home",
         timezone="Europe/London",
@@ -362,6 +366,7 @@ async def test_production_planner_preserves_bridge_and_reuses_snapshot(local_day
         tariff=SimpleNamespace(stale_after_minutes=480),
     )
     await operation._plan(prop, day.date(), now)
+    operation.adapters["home"].raw_intervals = ()
     await operation._plan(prop, day.date(), now)
     assert stored["fetches"] == 1
     first, second = stored["decisions"]
