@@ -2,6 +2,28 @@
 
 Last verified: 2026-09-06
 
+Optional irradiance addition (2026-10-24): see [data semantics](irradiance-history.md) and the
+[LXC opt-in procedure](../deployment/LXC.md#optional-satellite-history-capacity-and-enablement).
+The default remains disabled. `properties[].irradiance_history.enabled` opts in;
+`adapter` is `open_meteo_satellite`; `catch_up_days` is 1–30 completed UTC days (default 7).
+`tokens.irradiance-history` selects `${INFLUX_IRRADIANCE_HISTORY_TOKEN}` from
+`irradiance-history.env`. Obtain this secret from the Influx administrator with planning-bucket
+read/write only. Validate with the `irradiance-history` maintenance scope, confirm collection
+coverage, and rotate by replacing/testing this worker's token before revoking the old token.
+No inverter credentials, telemetry/tariff grants or provider API key belong in this scope.
+
+`solar-battery-irradiance-history` uses its own Unix identity, private 0700 outbox and status path;
+copy the tracked environment template as root:solar-irradiance-history mode 0640. Configure
+`OUTBOX_STATE_DIRECTORY=/var/lib/solar-battery-irradiance-history` and
+`STATUS_DIRECTORY=/run/solar-battery-status/irradiance-history`. Never source environment files.
+Include this identity in the peer-secret isolation and restart checks below when enabled.
+Its 80 MB ceiling raises aggregate service ceilings to 496 MB. **512 MB is insufficient**;
+increase container capacity and validate OS/service headroom without reducing existing limits.
+The new endpoint is `https://satellite-api.open-meteo.com/v1/archive`; it receives configured
+coordinates. Verify current satellite licence, quotas, coverage and site configuration before
+enabling. Prior weather-model history is not measured actual data, and original forecast snapshots
+cannot be reconstructed retrospectively. No irradiance-based automatic calibration is enabled.
+
 This guide takes an operator from an empty Proxmox container to a running,
 recommendation-only Solar Battery Forecaster installation. It also explains where each required
 value comes from, which process receives it, and how to prove that the installation works without

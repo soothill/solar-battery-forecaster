@@ -31,6 +31,13 @@ credentials; credentials are never stored in this repository.
 
 ## How it works
 
+New forecasts also preserve unmodified per-array GHI/GTI. An optional independent
+`irradiance-history` worker collects satellite-derived estimates, with separate provenance and
+coverage; there is no site irradiance sensor. See [irradiance history](docs/irradiance-history.md).
+Earlier forecasts cannot be reconstructed; comparisons require validated site geometry.
+The extra 80 MB worker raises service ceilings to 496 MB. Increase LXC capacity and validate
+headroom before enabling it; 512 MB is insufficient for that configuration.
+
 At five-minute intervals the telemetry worker reads PV power, battery state of charge, load, grid
 flow, and cumulative generation. Before the overnight period it preserves the next day's
 forecast, calculates a robust correction factor from completed days, and writes a battery

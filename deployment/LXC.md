@@ -70,7 +70,7 @@ apt-get update
 apt-get install -y ca-certificates python3 python3-venv util-linux
 groupadd --system solar-config
 groupadd --system solar-observe
-for identity in solar-telemetry solar-tariff solar-forecast-plan solar-reconciliation; do
+for identity in solar-telemetry solar-tariff solar-forecast-plan solar-reconciliation solar-irradiance-history; do
   groupadd --system "$identity"
   useradd --system --home /nonexistent --shell /usr/sbin/nologin \
     --gid "$identity" --groups solar-config "$identity"
@@ -106,6 +106,9 @@ install -o root -g solar-reconciliation -m 0640 \
 install -o root -g solar-dashboard -m 0640 \
   /opt/solar-battery-forecaster/deployment/environment/dashboard.env.example \
   /etc/solar-battery-forecaster/dashboard.env
+install -o root -g solar-irradiance-history -m 0640 \
+  /opt/solar-battery-forecaster/deployment/environment/irradiance-history.env.example \
+  /etc/solar-battery-forecaster/irradiance-history.env
 chown root:solar-config /etc/solar-battery-forecaster/config.yaml
 chmod 0640 /etc/solar-battery-forecaster/config.yaml
 cp /opt/solar-battery-forecaster/deployment/*.service /etc/systemd/system/
@@ -146,7 +149,7 @@ check_isolation() {
   own="$2"
   runuser -u "$identity" -- test -r /etc/solar-battery-forecaster/config.yaml
   runuser -u "$identity" -- test -r "/etc/solar-battery-forecaster/$own.env"
-  for peer in telemetry tariff forecast-plan reconciliation dashboard; do
+  for peer in telemetry tariff forecast-plan reconciliation dashboard irradiance-history; do
     if [ "$peer" != "$own" ]; then
       runuser -u "$identity" -- test ! -r "/etc/solar-battery-forecaster/$peer.env"
     fi
@@ -157,6 +160,7 @@ check_isolation solar-tariff tariff
 check_isolation solar-forecast-plan forecast-plan
 check_isolation solar-reconciliation reconciliation
 check_isolation solar-dashboard dashboard
+check_isolation solar-irradiance-history irradiance-history
 ```
 
 All commands must exit zero. Also inspect `namei -l` for the configuration directory and confirm
@@ -261,6 +265,39 @@ silently removing a unit limit, if Linux soak tests at the intended property/arr
 dashboard concurrency show sustained `MemoryCurrent` close to a ceiling.
 
 ## Upgrade and rollback
+
+### Optional satellite history capacity and enablement
+
+`solar-battery-irradiance-history` is installed but not enabled by baseline commands. Its extra
+`MemoryMax=80M` raises ceilings from 416 MB to **496 MB**. 512 MB is insufficient validated
+headroom for the OS and service manager. Increase LXC RAM before enabling, retain existing limits,
+and repeat Linux memory/restart/outbox acceptance at the intended property/array count. No revised
+capacity is claimed as validated.
+
+After checking provider licensing/quotas and site geometry, enable selected properties in
+`irradiance_history`. Provision `INFLUX_IRRADIANCE_HISTORY_TOKEN` in private
+`irradiance-history.env` with **read/write solar_planning only**; no unrelated credentials belong
+there. The outbox is `/var/lib/solar-battery-irradiance-history` (0700) and status is
+`/run/solar-battery-status/irradiance-history` (2750, solar-observe readable). The dashboard expects
+this status only when a property enables history.
+
+Run inside the LXC as administrator after release verification, sizing and private configuration:
+
+```bash
+set -euo pipefail
+systemctl start solar-battery-validate@irradiance-history.service
+systemctl start solar-battery-once@irradiance-history.service
+systemctl start solar-battery-outbox-verify@irradiance-history.service
+systemctl enable --now solar-battery-irradiance-history
+```
+
+Existing maintenance templates accept this scope for outbox status/drain and one-shot collection;
+never source its environment file. Include the sixth identity in isolation, memory and restart
+checks when enabled. Roll back by stopping/disabling this service and setting `enabled: false`;
+retain its private fallback until drained or deliberately archived. Existing history is separate
+from forecasts and generation. See [data semantics](../docs/irradiance-history.md).
+
+### Existing workers
 
 Stop only the service being upgraded, start its
 `solar-battery-outbox-verify@SCOPE.service` unit, and back up its database plus WAL/SHM sidecars

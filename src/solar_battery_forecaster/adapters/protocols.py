@@ -1,10 +1,26 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol
 
 from solar_battery_forecaster.config import PropertyConfig
-from solar_battery_forecaster.models import ForecastInterval, TariffInterval, Telemetry
+from solar_battery_forecaster.models import (
+    ForecastInterval,
+    HistoricalIrradianceInterval,
+    TariffInterval,
+    Telemetry,
+)
+
+
+class IrradianceHistoryAdapter(Protocol):
+    name: str
+    model: str
+
+    async def fetch(
+        self, prop: PropertyConfig, day: date
+    ) -> list[HistoricalIrradianceInterval]: ...
+
+    async def close(self) -> None: ...
 
 
 class ForecastAdapter(Protocol):

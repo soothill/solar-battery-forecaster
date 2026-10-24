@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 ENV_PATTERN = re.compile(r"^\$\{([A-Z][A-Z0-9_]*)\}$")
 PROPERTY_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 ConfigScope: TypeAlias = Literal[
-    "telemetry", "tariff", "forecast-plan", "reconciliation", "dashboard"
+    "telemetry", "tariff", "forecast-plan", "reconciliation", "irradiance-history", "dashboard"
 ]
 SENSITIVE_PROVIDER_KEYS = {
     "api_key",
@@ -215,6 +215,14 @@ class ForecastConfig(BaseModel):
     conservative_multiplier: float = Field(default=0.8, gt=0, le=1)
 
 
+class IrradianceHistoryConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    adapter: Literal["open_meteo_satellite"] = "open_meteo_satellite"
+    catch_up_days: int = Field(default=7, ge=1, le=30)
+
+
 class LoadConfig(BaseModel):
     expected_kwh_until_next_cheap_window: float = Field(default=8, ge=0)
 
@@ -236,8 +244,16 @@ class PropertyConfig(BaseModel):
     inverter: InverterConfig
     battery: BatteryConfig
     forecast: ForecastConfig = Field(default_factory=ForecastConfig)
+    irradiance_history: IrradianceHistoryConfig = Field(default_factory=IrradianceHistoryConfig)
     load: LoadConfig = Field(default_factory=LoadConfig)
     tariff: TariffConfig
+
+    @field_validator("arrays")
+    @classmethod
+    def unique_array_names(cls, value: list[ArrayConfig]) -> list[ArrayConfig]:
+        if len({array.name for array in value}) != len(value):
+            raise ValueError("array names must be unique")
+        return value
 
     @field_validator("timezone")
     @classmethod
@@ -313,11 +329,13 @@ def _prepare_scope(raw: dict[str, object], scope: ConfigScope) -> dict[str, obje
         "inverter": "telemetry",
         "tariff": "tariff",
         "forecast": "forecast-plan",
+        "irradiance_history": "irradiance-history",
     }
     supported_secrets = {
         "inverter": frozenset({"app_key", "app_secret", "system_id"}),
         "tariff": frozenset(),
         "forecast": frozenset(),
+        "irradiance_history": frozenset(),
     }
     properties = prepared.get("properties")
     if not isinstance(properties, list):

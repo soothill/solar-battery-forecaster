@@ -11,6 +11,7 @@ influxdb:
     tariff: ${INFLUX_TARIFF_TOKEN}
     forecast-plan: ${INFLUX_FORECAST_PLAN_TOKEN}
     reconciliation: ${INFLUX_RECONCILIATION_TOKEN}
+    irradiance-history: ${INFLUX_IRRADIANCE_HISTORY_TOKEN}
     dashboard: ${INFLUX_DASHBOARD_TOKEN}
 
 http:
@@ -98,6 +99,12 @@ properties:
       adapter: open_meteo
       initial_correction_factor: 1.0
       conservative_multiplier: 0.80
+
+    # Separate satellite-derived estimates, never a site irradiance sensor.
+    irradiance_history:
+      enabled: false
+      adapter: open_meteo_satellite
+      catch_up_days: 7
 
     load:
       # Daily load energy, distributed over the property's 23/24/25-hour local day.

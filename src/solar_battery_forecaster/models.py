@@ -9,6 +9,25 @@ def forecast_snapshot_id(issued_at: datetime) -> str:
 
 
 @dataclass(frozen=True)
+class ArrayIrradiance:
+    array: str
+    tilt_degrees: float
+    azimuth_degrees: float
+    ghi_w_m2: float | None
+    gti_w_m2: float | None
+    geometry: str = ""
+
+
+@dataclass(frozen=True)
+class ForecastIrradianceInterval:
+    start: datetime
+    end: datetime
+    issued_at: datetime
+    provider: str
+    irradiance: tuple[ArrayIrradiance, ...]
+
+
+@dataclass(frozen=True)
 class ForecastInterval:
     start: datetime
     end: datetime
@@ -18,6 +37,18 @@ class ForecastInterval:
     provider: str
     corrected_energy_kwh: float | None = None
     conservative_energy_kwh: float | None = None
+    irradiance: tuple[ArrayIrradiance, ...] = ()
+
+
+@dataclass(frozen=True)
+class HistoricalIrradianceInterval:
+    start: datetime
+    end: datetime
+    collected_at: datetime
+    provider: str
+    model: str
+    irradiance: tuple[ArrayIrradiance, ...]
+    source_kind: str = "satellite_derived"
 
 
 @dataclass(frozen=True)

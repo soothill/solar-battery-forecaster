@@ -4,9 +4,11 @@ import httpx
 
 from solar_battery_forecaster.adapters.forecast.open_meteo import OpenMeteoForecast
 from solar_battery_forecaster.adapters.inverter.sigenergy import SigenergyCloud
+from solar_battery_forecaster.adapters.irradiance.open_meteo import OpenMeteoSatellite
 from solar_battery_forecaster.adapters.protocols import (
     ForecastAdapter,
     InverterAdapter,
+    IrradianceHistoryAdapter,
     TariffAdapter,
 )
 from solar_battery_forecaster.adapters.tariff.octopus import OctopusTariff
@@ -24,6 +26,15 @@ INVERTER_FACTORIES = {
 TARIFF_FACTORIES = {
     "octopus": lambda prop, client, pacer: OctopusTariff(prop.tariff, client, pacer),
 }
+IRRADIANCE_HISTORY_FACTORIES = {
+    "open_meteo_satellite": lambda _prop, client, pacer: OpenMeteoSatellite(client, pacer),
+}
+
+
+def irradiance_history_adapter(
+    prop: PropertyConfig, client: httpx.AsyncClient, pacer: RequestPacer,
+) -> IrradianceHistoryAdapter:
+    return IRRADIANCE_HISTORY_FACTORIES[prop.irradiance_history.adapter](prop, client, pacer)
 
 
 def forecast_adapter(

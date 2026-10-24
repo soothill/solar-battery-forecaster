@@ -18,7 +18,9 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 from solar_battery_forecaster.config import InfluxConfig, OutboxConfig, PropertyConfig
 from solar_battery_forecaster.dashboard import InfluxDashboardRepository
 from solar_battery_forecaster.models import (
+    ArrayIrradiance,
     ForecastInterval,
+    HistoricalIrradianceInterval,
     TariffInterval,
     Telemetry,
     forecast_snapshot_id,
@@ -140,6 +142,7 @@ def test_real_influx_direct_failure_restart_replay_and_idempotency(real_store, t
         assert sorted(row.get_value() for row in rows) == [1.25, 1.25]
         assert sorted(row.get_time() for row in rows) == [first.observed_at, second.observed_at]
         _assert_real_plan_roundtrip(recovered)
+        _assert_real_irradiance_roundtrip(recovered)
     finally:
         recovered.close()
 
@@ -193,3 +196,40 @@ def _assert_real_plan_roundtrip(store):
         assert points[-1]["at"] == stop.isoformat()
     finally:
         repository.close()
+
+
+def _assert_real_irradiance_roundtrip(store):
+    start = datetime(2026, 9, 5, tzinfo=UTC)
+    day = start.date()
+    raw = ArrayIrradiance("roof", 35.0, 180.0, 100.0, 200.0, "synthetic-geometry")
+    forecast = ForecastInterval(
+        start, start + timedelta(hours=1), 1.0, 1.0, start - timedelta(days=1),
+        "open_meteo", irradiance=(raw,),
+    )
+    assert store.write_forecast("synthetic-home", [forecast], 1, 1) == "direct"
+    for revision, value in enumerate([300.0, 400.0, None], start=1):
+        collected = start + timedelta(days=revision)
+        rows = [HistoricalIrradianceInterval(
+            start + timedelta(hours=i), start + timedelta(hours=i + 1), collected,
+            "open_meteo_satellite", "satellite_radiation_seamless",
+            (ArrayIrradiance("roof", 35.0, 180.0, value, value, "synthetic-geometry"),),
+        ) for i in range(24)]
+        assert store.write_irradiance_history(
+            "synthetic-home", day, collected.date(), rows,
+        ) == "direct"
+    query = '''from(bucket: "synthetic-planning")
+      |> range(start: 2026-09-05T00:00:00Z, stop: 2026-09-06T00:00:00Z)
+      |> filter(fn: (r) => r._measurement == "irradiance_history"
+        and r.property == "synthetic-home" and r.geometry == "synthetic-geometry"
+        and r._field == "value_w_m2")'''
+    rows = store._records(query)
+    assert len(rows) == 48
+    assert {row.get_value() for row in rows} == {400.0}
+    coverage_query = query.replace('r._measurement == "irradiance_history"',
+                                   'r._measurement == "irradiance_history_collection"').replace(
+                                       'r._field == "value_w_m2"', 'r._field == "valid_hours"')
+    assert {row.get_value() for row in store._records(coverage_query)} == {0}
+    forecast_query = query.replace('r._measurement == "irradiance_history"',
+                                   'r._measurement == "irradiance_forecast"').replace(
+                                       'r._field == "value_w_m2"', 'r._field == "gti_w_m2"')
+    assert [row.get_value() for row in store._records(forecast_query)] == [200.0]
